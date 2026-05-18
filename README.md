@@ -61,8 +61,16 @@ npm run package
 
 Then install the `.vsix`:
 
+**macOS / Linux**
+
 ```bash
 code --install-extension ai-engineer-coach-*.vsix
+```
+
+**Windows / PowerShell**
+
+```powershell
+code --install-extension (Get-ChildItem . -Filter 'ai-engineer-coach-*.vsix' | Select-Object -First 1).FullName
 ```
 
 1. Open the command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
@@ -141,7 +149,3 @@ Any use of third-party trademarks or logos are subject to those third-party's po
 ## Disclaimer
 
 This project is an open-source community effort by Microsoft employees. It is **not** an official Microsoft product and is not part of any Microsoft service or support offering. It is provided as-is with no warranties or guarantees.
-
-## Contributors
-
-Sanjay Singh, Joy Distelbrink, Tamas Boncz, Aymen Furter
