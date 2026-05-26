@@ -100,10 +100,18 @@ const cssSources = [
   'src/webview/styles-skills.css',
   'src/webview/styles-learning.css',
 ];
-const bundledCss = cssSources
-  .map(source => fs.readFileSync(source, 'utf-8').trimEnd())
-  .join('\n\n');
-fs.writeFileSync(path.join(webviewDist, 'styles.css'), `${bundledCss}\n`);
+
+function bundleCss() {
+  const bundledCss = cssSources
+    .map(source => fs.readFileSync(source, 'utf-8').trimEnd())
+    .join('\n\n');
+  fs.writeFileSync(path.join(webviewDist, 'styles.css'), `${bundledCss}\n`);
+}
+
+bundleCss();
+
+// Copy sidebar CSS separately (sidebar is its own webview)
+fs.copyFileSync('src/webview/styles-sidebar.css', path.join(webviewDist, 'sidebar.css'));
 
 console.log('Build complete.');
 
@@ -158,5 +166,15 @@ if (isWatch) {
     sourcemap: true,
   });
   await Promise.all([ctx1.watch(), ctx2.watch(), ctx3.watch(), ctx4.watch(), ctx5.watch()]);
+  for (const source of cssSources) {
+    fs.watch(source, () => {
+      try {
+        bundleCss();
+        console.log(`CSS rebuilt (${source} changed)`);
+      } catch (err) {
+        console.error('CSS rebuild failed:', err);
+      }
+    });
+  }
   console.log('Watching for changes...');
 }

@@ -54,3 +54,13 @@ export function postEvent(webview: vscode.Webview, method: string, data: unknown
 export function getNonce(): string {
   return crypto.randomBytes(16).toString('base64url');
 }
+
+/** Escape HTML special characters to prevent XSS when interpolating into templates. */
+export function escapeHtmlAttr(s: string): string {
+  return s
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
