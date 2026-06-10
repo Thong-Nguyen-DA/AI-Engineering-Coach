@@ -4,8 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { detectDevcontainerFromRequests, extractSkillPathsFromText, createRequest, createSession } from './parser-shared';
-import { recordFailedFile, recordSkippedLines, getParseWarningCounts, getParseWarnings, resetParseWarnings } from './parser-shared';
+import {
+  detectDevcontainerFromRequests, extractSkillPathsFromText, createRequest, createSession,
+  recordFailedFile, recordSkippedLines, getParseWarningCounts, getParseWarnings, resetParseWarnings,
+} from './parser-shared';
 import { SessionRequest } from './types';
 
 function makeReq(overrides: Partial<SessionRequest> = {}): SessionRequest {

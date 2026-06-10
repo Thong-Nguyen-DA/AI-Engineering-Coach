@@ -136,6 +136,7 @@ export interface ExtensionMethodMap extends RpcMethodMap {
   getSdlcGitHubData: { params: Record<string, unknown>; result: unknown };
   saveModelBudgets: { params: { budgets: Record<string, number> }; result: { ok: boolean } };
   loadModelBudgets: { params: Record<string, unknown> | undefined; result: Record<string, number> };
+  showOutput: { params: undefined; result: { ok: boolean } };
 }
 
 export type ExtensionMethodName = keyof ExtensionMethodMap;

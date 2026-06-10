@@ -26,6 +26,11 @@ export default tseslint.config(
       unicorn,
     },
     rules: {
+      'max-lines': ['warn', { max: 400, skipBlankLines: true, skipComments: true }],
+      'max-lines-per-function': ['warn', { max: 50, skipBlankLines: true, skipComments: true, IIFEs: true }],
+      'complexity': ['warn', 12],
+      'max-depth': ['warn', 4],
+      'max-params': ['warn', 4],
       "@typescript-eslint/no-unused-vars": [
         "error",
         {

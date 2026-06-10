@@ -6,8 +6,11 @@
 /* Webview entry -- runs in the browser context inside the VS Code webview */
 
 import { AntiPatternData, DateFilter, StatsResult } from '../core/types';
+import { FF_TOKEN_REPORTING_ENABLED } from '../core/constants';
 import { $, $$, rpc, destroyCharts, initMessageListener, withErrorBoundary, type WorkerTelemetry } from './shared';
 import { updateTelemetry } from './telemetry-strip';
+import { formatStatCount } from './loading-grid-model';
+import { renderWorkspaceGrid, updateWorkspaceCell } from './loading-grid-view';
 import { html, render, unmount, ComponentChildren } from './render';
 import { renderDashboard } from './page-dashboard';
 import { renderPatterns } from './page-patterns';
@@ -22,7 +25,6 @@ import { renderLevelUp } from './page-experiments';
 import { renderDataExplorer } from './page-data-explorer';
 import { renderRulePlayground } from './page-rule-playground';
 import { renderImageGallery } from './page-image-gallery';
-import { FF_TOKEN_REPORTING_ENABLED } from '../core/constants';
 
 function normalizePageForFeatureFlags(page: string): string {
   if (!FF_TOKEN_REPORTING_ENABLED && page === 'burndown') return 'dashboard';
@@ -151,173 +153,8 @@ function ensureLoadingUI(): void {
   }, 1000);
 }
 
-/* ---- Workspace loading grid state ---- */
-let workspacePlan: string[] = [];
-let workspaceDone = new Set<string>();
-let workspaceRendered = false;
-let workspaceSlotIndex = new Map<string, number>();
-let loadingGridResizeBound = false;
-
-interface WorkspacePlanMeta {
-  key: string;
-  order: number;
-  date: string | null;
-  month: string;
-  workspace: string;
-  workspaceKey: string;
-  size: number;
-}
-
-let workspaceGroupSlots = new Map<string, number[]>();
-
-function layoutWorkspaceGrid(): void {
-  const container = document.getElementById('loading-tile-bg');
-  const grid = document.getElementById('loading-bg-grid');
-  if (!container || !grid) return;
-
-  const W = container.clientWidth;
-  const H = container.clientHeight;
-  const N = workspacePlan.length;
-  if (N === 0 || W < 20 || H < 20) return;
-
-  // Compute rows & cols proportional to viewport aspect ratio
-  const aspect = W / H;
-  const rows = Math.max(1, Math.ceil(Math.sqrt(N / aspect)));
-  const cols = Math.max(1, Math.ceil(N / rows));
-
-  // Cell size: fill ~60% of space with tiles, rest is breathing room via space-evenly
-  const maxCellW = W / cols;
-  const maxCellH = H / rows;
-  const stride = Math.min(maxCellW, maxCellH);
-  const size = Math.max(2, Math.min(16, Math.floor(stride * 0.6)));
-
-  grid.style.setProperty('--bg-rows', String(rows));
-  grid.style.setProperty('--bg-cols', String(cols));
-  grid.style.setProperty('--bg-cell', `${size}px`);
-}
-
-function percentile(values: number[], p: number): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = (sorted.length - 1) * p;
-  const lo = Math.floor(idx);
-  const hi = Math.ceil(idx);
-  if (lo === hi) return sorted[lo];
-  const weight = idx - lo;
-  return sorted[lo] * (1 - weight) + sorted[hi] * weight;
-}
-
-function sessionIntensityLevel(size: number, breakpoints: { q25: number; q50: number; q75: number }): 1 | 2 | 3 | 4 {
-  if (size >= breakpoints.q75 && breakpoints.q75 > 0) return 4;
-  if (size >= breakpoints.q50 && breakpoints.q50 > 0) return 3;
-  if (size >= breakpoints.q25 && breakpoints.q25 > 0) return 2;
-  return 1;
-}
-
-function sessionTileVars(level: 1 | 2 | 3 | 4): { pendingBg: string; pendingBorder: string; doneBg: string; doneBorder: string; doneGlow: string } {
-  const strengths = {
-    1: { pending: 6, border: 14, done: 35, glow: 18 },
-    2: { pending: 9, border: 18, done: 48, glow: 24 },
-    3: { pending: 12, border: 24, done: 62, glow: 30 },
-    4: { pending: 16, border: 30, done: 78, glow: 38 },
-  }[level];
-
-  return {
-    pendingBg: `color-mix(in srgb, var(--accent-blue) ${strengths.pending}%, var(--vscode-editor-background, #1e1e1e))`,
-    pendingBorder: `color-mix(in srgb, var(--accent-blue) ${strengths.border}%, var(--border))`,
-    doneBg: `color-mix(in srgb, var(--vscode-progressBar-background, var(--accent-blue)) ${strengths.done}%, var(--vscode-editor-background, #1e1e1e))`,
-    doneBorder: `color-mix(in srgb, var(--vscode-progressBar-background, var(--accent-blue)) ${Math.min(90, strengths.done + 8)}%, var(--border))`,
-    doneGlow: `color-mix(in srgb, var(--vscode-progressBar-background, var(--accent-blue)) ${strengths.glow}%, transparent)`,
-  };
-}
-
-function parseWorkspacePlanKey(key: string, fallbackOrder: number): WorkspacePlanMeta {
-  try {
-    const parsed = JSON.parse(key) as { order?: number; date?: string | null; wsId?: string; workspaceKey?: string; size?: number };
-    const order = typeof parsed.order === 'number' ? parsed.order : fallbackOrder;
-    const date = typeof parsed.date === 'string' ? parsed.date : null;
-    return {
-      key,
-      order,
-      date,
-      month: date ? date.slice(0, 7) : `chunk-${Math.floor(fallbackOrder / 28)}`,
-      workspace: typeof parsed.wsId === 'string' && parsed.wsId.length > 0 ? parsed.wsId : `Workspace ${fallbackOrder + 1}`,
-      workspaceKey: typeof parsed.workspaceKey === 'string' && parsed.workspaceKey.length > 0 ? parsed.workspaceKey : `workspace-${fallbackOrder}`,
-      size: typeof parsed.size === 'number' ? parsed.size : 0,
-    };
-  } catch {
-    return {
-      key,
-      order: fallbackOrder,
-      date: null,
-      month: `chunk-${Math.floor(fallbackOrder / 28)}`,
-      workspace: `Workspace ${fallbackOrder + 1}`,
-      workspaceKey: `workspace-${fallbackOrder}`,
-      size: 0,
-    };
-  }
-}
-
-function renderWorkspaceGrid(plan: string[]): void {
-  workspacePlan = plan;
-  workspaceDone = new Set();
-  workspaceRendered = true;
-  workspaceSlotIndex = new Map();
-  workspaceGroupSlots = new Map();
-
-  const container = document.getElementById('loading-tile-bg');
-  if (!container) return;
-  if (plan.length === 0) { container.style.display = 'none'; return; }
-
-  const items = plan.map((key, index) => parseWorkspacePlanKey(key, index))
-    .sort((a, b) => a.order - b.order);
-  const sizes = items.map(item => item.size).filter(size => size > 0);
-  const intensityBreakpoints = {
-    q25: percentile(sizes, 0.25),
-    q50: percentile(sizes, 0.5),
-    q75: percentile(sizes, 0.75),
-  };
-
-  for (const item of items) {
-    workspaceSlotIndex.set(item.key, item.order);
-    const existingSlots = workspaceGroupSlots.get(item.workspaceKey) ?? [];
-    existingSlots.push(item.order);
-    workspaceGroupSlots.set(item.workspaceKey, existingSlots);
-  }
-
-  const gridCells = items.map(item => {
-    const level = sessionIntensityLevel(item.size, intensityBreakpoints);
-    const vars = sessionTileVars(level);
-    const titleParts = [item.date ? item.date : '', item.workspace, item.size > 0 ? `${Math.round(item.size / 1024)} KB session` : 'session'];
-    return html`<div class="cal-cell cal-workspace-cell cal-workspace-pending" data-slot=${item.order} title=${titleParts.filter(Boolean).join(' \u2014 ')} style=${`--pending-bg:${vars.pendingBg};--pending-border:${vars.pendingBorder};--done-bg:${vars.doneBg};--done-border:${vars.doneBorder};--done-glow:${vars.doneGlow};`}></div>`;
-  });
-  render(html`<div class="loading-bg-grid" id="loading-bg-grid">${gridCells}</div>`, container);
-  container.style.display = '';
-
-  requestAnimationFrame(() => layoutWorkspaceGrid());
-
-  if (!loadingGridResizeBound) {
-    window.addEventListener('resize', layoutWorkspaceGrid);
-    loadingGridResizeBound = true;
-  }
-}
-
 function renderPageLater(page: string): void {
   void renderPage(page);
-}
-
-function updateWorkspaceCell(workspaceKey: string, detail?: string): void {
-  if (!workspaceRendered || workspaceDone.has(workspaceKey)) return;
-  const slots = workspaceGroupSlots.get(workspaceKey);
-  if (!slots || slots.length === 0) return;
-  workspaceDone.add(workspaceKey);
-
-  for (const slotIdx of slots) {
-    const cell = document.querySelector<HTMLElement>(`[data-slot="${slotIdx}"]`);
-    if (!cell) continue;
-    cell.className = 'cal-cell cal-workspace-cell cal-workspace-done cal-pop';
-    if (detail) cell.title = detail;
-  }
 }
 
 function updateLoadingLog(phase: string, detail: string): void {
@@ -359,7 +196,59 @@ function updatePhaseChecklist(currentPhase: number): void {
 }
 
 /** Update UI based on progress message */
-function handleProgress(msg: { phase: number; detail?: string; pct: number; sessions?: number; linesOfCode?: number; toolCalls?: number; imagesAnalyzed?: number; filesEdited?: number; requests?: number; workspacePlan?: string[]; workspaceDone?: string; telemetry?: WorkerTelemetry }): void {
+interface ProgressMessage {
+  phase: number;
+  detail?: string;
+  pct: number;
+  sessions?: number;
+  linesOfCode?: number;
+  toolCalls?: number;
+  imagesAnalyzed?: number;
+  filesEdited?: number;
+  requests?: number;
+  workspacePlan?: string[];
+  workspaceDone?: string;
+  telemetry?: WorkerTelemetry;
+}
+
+/* Static markup for the loading "fun stats" ticker. Injected once (guarded by dataset.init);
+ * the per-message counts are then updated in-place by renderStatsTicker. */
+const STATS_TICKER_TEMPLATE = [
+  `<span class="ticker-stat" id="ts-loc"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M4 2h5l3 3v9H4V2z" stroke="currentColor" stroke-width="1.3"/><path d="M6 8h4M6 10.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg><span class="ticker-value" id="tv-loc">0</span> lines generated</span>`,
+  `<span class="ticker-stat" id="ts-tools"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M10.3 2.5a2.2 2.2 0 0 0-3 3.1L3.5 9.4l-.9 3.1 3.1-.9 3.8-3.8a2.2 2.2 0 0 0 3.1-3l-1.6 1.6-1.1-1.1L11.5 3.7z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ticker-value" id="tv-tools">0</span> tool calls</span>`,
+  `<span class="ticker-stat" id="ts-images"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/><circle cx="5.5" cy="6.5" r="1.2" stroke="currentColor" stroke-width="1"/><path d="M2 11l3-3 2 2 4-4 3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ticker-value" id="tv-images">0</span> images analyzed</span>`,
+  `<span class="ticker-stat" id="ts-files"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3H7l1 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5V4.5z" stroke="currentColor" stroke-width="1.2"/></svg><span class="ticker-value" id="tv-files">0</span> files touched</span>`,
+  `<span class="ticker-stat" id="ts-reqs"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M3 3h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H5l-3 2.5V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg><span class="ticker-value" id="tv-reqs">0</span> prompts sent</span>`,
+].join('');
+
+/* Update the fun-stats ticker in-place (no re-render once seeded). Each stat is hidden when its
+ * count is absent so the strip only shows metrics we actually have data for. */
+function renderStatsTicker(msg: ProgressMessage): void {
+  const tickerEl = document.getElementById('loading-stats-ticker');
+  if (!tickerEl || !msg.sessions || msg.sessions <= 0) return;
+  if (!tickerEl.dataset.init) {
+    tickerEl.dataset.init = '1';
+    tickerEl.innerHTML = STATS_TICKER_TEMPLATE;
+  }
+  const locEl = document.getElementById('tv-loc');
+  const toolsEl = document.getElementById('tv-tools');
+  const imagesEl = document.getElementById('tv-images');
+  const filesEl = document.getElementById('tv-files');
+  const reqsEl = document.getElementById('tv-reqs');
+  if (locEl && msg.linesOfCode) locEl.textContent = formatStatCount(msg.linesOfCode);
+  if (toolsEl && msg.toolCalls) toolsEl.textContent = msg.toolCalls.toLocaleString();
+  if (imagesEl && msg.imagesAnalyzed) imagesEl.textContent = msg.imagesAnalyzed.toLocaleString();
+  if (filesEl && msg.filesEdited) filesEl.textContent = msg.filesEdited.toLocaleString();
+  if (reqsEl && msg.requests) reqsEl.textContent = msg.requests.toLocaleString();
+  // Show/hide stats that have no data
+  document.getElementById('ts-loc')?.classList.toggle('ticker-hidden', !msg.linesOfCode);
+  document.getElementById('ts-tools')?.classList.toggle('ticker-hidden', !msg.toolCalls);
+  document.getElementById('ts-images')?.classList.toggle('ticker-hidden', !msg.imagesAnalyzed);
+  document.getElementById('ts-files')?.classList.toggle('ticker-hidden', !msg.filesEdited);
+  document.getElementById('ts-reqs')?.classList.toggle('ticker-hidden', !msg.requests);
+}
+
+function handleProgress(msg: ProgressMessage): void {
   ensureLoadingUI();
   const phase = PHASE_LABELS[msg.phase] ?? `Phase ${msg.phase}`;
   const detail = msg.detail ?? '';
@@ -388,41 +277,7 @@ function handleProgress(msg: { phase: number; detail?: string; pct: number; sess
     sessEl.textContent = `${msg.sessions.toLocaleString()} sessions`;
   }
 
-  // Update fun stats ticker (update values in-place, no re-render)
-  const tickerEl = document.getElementById('loading-stats-ticker');
-  if (tickerEl && msg.sessions && msg.sessions > 0) {
-    if (!tickerEl.dataset.init) {
-      tickerEl.dataset.init = '1';
-      tickerEl.innerHTML = [
-        `<span class="ticker-stat" id="ts-loc"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M4 2h5l3 3v9H4V2z" stroke="currentColor" stroke-width="1.3"/><path d="M6 8h4M6 10.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg><span class="ticker-value" id="tv-loc">0</span> lines generated</span>`,
-        `<span class="ticker-stat" id="ts-tools"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M10.3 2.5a2.2 2.2 0 0 0-3 3.1L3.5 9.4l-.9 3.1 3.1-.9 3.8-3.8a2.2 2.2 0 0 0 3.1-3l-1.6 1.6-1.1-1.1L11.5 3.7z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ticker-value" id="tv-tools">0</span> tool calls</span>`,
-        `<span class="ticker-stat" id="ts-images"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/><circle cx="5.5" cy="6.5" r="1.2" stroke="currentColor" stroke-width="1"/><path d="M2 11l3-3 2 2 4-4 3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="ticker-value" id="tv-images">0</span> images analyzed</span>`,
-        `<span class="ticker-stat" id="ts-files"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3H7l1 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5V4.5z" stroke="currentColor" stroke-width="1.2"/></svg><span class="ticker-value" id="tv-files">0</span> files touched</span>`,
-        `<span class="ticker-stat" id="ts-reqs"><svg class="ticker-icon" viewBox="0 0 16 16" fill="none"><path d="M3 3h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H5l-3 2.5V4a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg><span class="ticker-value" id="tv-reqs">0</span> prompts sent</span>`,
-      ].join('');
-    }
-    const locEl = document.getElementById('tv-loc');
-    const toolsEl = document.getElementById('tv-tools');
-    const imagesEl = document.getElementById('tv-images');
-    const filesEl = document.getElementById('tv-files');
-    const reqsEl = document.getElementById('tv-reqs');
-    if (locEl && msg.linesOfCode) {
-      const locLabel = msg.linesOfCode >= 1_000_000
-        ? `${(msg.linesOfCode / 1_000_000).toFixed(1)}M`
-        : msg.linesOfCode >= 1_000 ? `${(msg.linesOfCode / 1_000).toFixed(0)}K` : String(msg.linesOfCode);
-      locEl.textContent = locLabel;
-    }
-    if (toolsEl && msg.toolCalls) toolsEl.textContent = msg.toolCalls.toLocaleString();
-    if (imagesEl && msg.imagesAnalyzed) imagesEl.textContent = msg.imagesAnalyzed.toLocaleString();
-    if (filesEl && msg.filesEdited) filesEl.textContent = msg.filesEdited.toLocaleString();
-    if (reqsEl && msg.requests) reqsEl.textContent = msg.requests.toLocaleString();
-    // Show/hide stats that have no data
-    document.getElementById('ts-loc')?.classList.toggle('ticker-hidden', !msg.linesOfCode);
-    document.getElementById('ts-tools')?.classList.toggle('ticker-hidden', !msg.toolCalls);
-    document.getElementById('ts-images')?.classList.toggle('ticker-hidden', !msg.imagesAnalyzed);
-    document.getElementById('ts-files')?.classList.toggle('ticker-hidden', !msg.filesEdited);
-    document.getElementById('ts-reqs')?.classList.toggle('ticker-hidden', !msg.requests);
-  }
+  renderStatsTicker(msg);
 
   updateLoadingLog(phase, detail);
   updatePhaseChecklist(msg.phase);

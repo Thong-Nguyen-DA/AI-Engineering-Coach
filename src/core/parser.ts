@@ -7,13 +7,12 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import { runtimeDebug } from './runtime-debug';
 import { Workspace } from './types';
-import { ParseContext, prefetchCache, stripSingleSession, maybeForceGc, recordFailedFile, resetParseWarnings, type ParseWarning } from './parser-shared';
+import { ParseContext, prefetchCache, stripSingleSession, maybeForceGc, recordFailedFile, resetParseWarnings } from './parser-shared';
 import { getMemoryCache, setMemoryCache, computeDirMetasAsync, loadCacheData, saveCacheData, findStaleDirs, clearCache, stripSessionsForMemory } from './cache';
 import type { DirMetas, ParseResult, SessionSource } from './cache';
-import { ChunkAssembler, type WorkerChunkPayload, type WorkerDonePayload } from './parse-chunking';
 import { findVsCodeDirs, scanVsCodeDirs, processWorkspaceEntry, processWorkspaceEntryAsync, harnessFromPath } from './parser-vscode';
+import { computeSessionTotals, createRunningTotals, type SessionTotals } from './session-totals';
 import { findXcodeDirs, parseXcodeDatabases, parseXcodeDatabasesAsync } from './parser-xcode';
 import { collectExternalHarnessesAsync, collectExternalHarnessesSync, EXTERNAL_HARNESS_SET } from './parser-harnesses';
 import { warnCore } from './log';
@@ -82,32 +81,6 @@ export const LOAD_PHASES = [
 const PHASE_STARTS = [0, 2, 10, 75, 85, 95];
 const PHASE_WIDTHS = [2, 8, 65, 10, 10, 5];
 
-function computeTotalLoc(sessions: import('./types').Session[]): number {
-  let total = 0;
-  for (const s of sessions) for (const r of s.requests) for (const b of r.aiCode) total += b.loc;
-  return total;
-}
-function computeTotalToolCalls(sessions: import('./types').Session[]): number {
-  let total = 0;
-  for (const s of sessions) for (const r of s.requests) total += r.toolsUsed.length;
-  return total;
-}
-function computeTotalImages(sessions: import('./types').Session[]): number {
-  let total = 0;
-  for (const s of sessions) for (const r of s.requests) total += r.variableKinds['image'] || 0;
-  return total;
-}
-function computeTotalFilesEdited(sessions: import('./types').Session[]): number {
-  const seen = new Set<string>();
-  for (const s of sessions) for (const r of s.requests) for (const f of r.editedFiles) seen.add(f);
-  return seen.size;
-}
-function computeTotalRequests(sessions: import('./types').Session[]): number {
-  let total = 0;
-  for (const s of sessions) total += s.requests.length;
-  return total;
-}
-
 function yieldToLoop(): Promise<void> {
   return new Promise(r => setImmediate(r));
 }
@@ -153,8 +126,6 @@ const MAX_PREFETCH_FILE_SIZE = 20 * 1024 * 1024;
 // regardless of how large individual session files are.
 const COLD_PARSE_MAX_PREFETCH_BYTES = 64 * 1024 * 1024;
 const MAX_PREFETCH_BYTES = 1024 * 1024 * 1024;
-const WORKER_MAX_OLD_SPACE_MB = 4096;
-const RETRY_WORKER_MAX_OLD_SPACE_MB = 6144;
 
 async function prefetchBatch(
   workItems: { logsDir: string; wsId: string }[],
@@ -218,24 +189,6 @@ async function prefetchBatch(
 
 const BATCH_SIZE = 32;
 
-/** The worker's `done` message is the chunking done payload plus worker-only dir fingerprints. */
-type WorkerDoneMessagePayload = WorkerDonePayload & {
-  dirMetas: DirMetas;
-  parseWarnings?: ParseWarning[];
-  parseWarningCounts?: { skippedFiles: number; skippedLines: number };
-};
-
-/** Surface any files the worker could not parse to the "AI Engineer Coach" output channel, so a
- *  silent partial parse becomes discoverable. runtimeDebug routes through the channel hook set up
- *  in extension.ts (View → Output → "AI Engineer Coach"). */
-function logParseWarnings(warnings: ParseWarning[] | undefined): void {
-  if (!warnings || warnings.length === 0) return;
-  runtimeDebug('parser', 'parse-warnings', `${warnings.length} file(s) could not be parsed:`);
-  for (const w of warnings) {
-    runtimeDebug('parser', 'parse-warnings', `  [${w.scope}] ${w.file} — ${w.reason}`);
-  }
-}
-
 function toDateStr(ms: number): string {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -283,18 +236,10 @@ type CacheHitResult = { result: ParseResult; dirMetas: DirMetas };
 
 async function reportWorkspaceProgress(
   onProgress: ProgressCallback | undefined,
-  processed: number,
-  totalDirs: number,
-  lastWsName: string,
-  elapsed: number,
-  sessions: number,
-  workspaceKey: string,
-  linesOfCode?: number,
-  toolCalls?: number,
-  imagesAnalyzed?: number,
-  filesEdited?: number,
-  requests?: number,
+  progress: { processed: number; totalDirs: number; lastWsName: string; elapsed: number; sessions: number; workspaceKey: string },
+  totals: SessionTotals,
 ): Promise<void> {
+  const { processed, totalDirs, lastWsName, elapsed, sessions, workspaceKey } = progress;
   const shouldYield = elapsed > 2000 || processed % 4 === 0 || processed === totalDirs;
   const suffix = elapsed > 2000 ? ` (${(elapsed / 1000).toFixed(1)}s)` : '';
   if (onProgress) {
@@ -303,11 +248,11 @@ async function reportWorkspaceProgress(
       detail: `workspace ${processed}/${totalDirs}: ${lastWsName}${suffix}`,
       pct: pct(2, processed / totalDirs),
       sessions,
-      linesOfCode,
-      toolCalls,
-      imagesAnalyzed,
-      filesEdited,
-      requests,
+      linesOfCode: totals.linesOfCode,
+      toolCalls: totals.toolCalls,
+      imagesAnalyzed: totals.imagesAnalyzed,
+      filesEdited: totals.filesEdited,
+      requests: totals.requests,
       workspaceDone: workspaceKey,
     });
   }
@@ -330,11 +275,7 @@ async function tryMemoryCache(
   report({
     phase: 1, detail: 'Loaded from memory', pct: pct(1, 1),
     sessions: mem.result.sessions.length,
-    linesOfCode: computeTotalLoc(mem.result.sessions),
-    toolCalls: computeTotalToolCalls(mem.result.sessions),
-    imagesAnalyzed: computeTotalImages(mem.result.sessions),
-    filesEdited: computeTotalFilesEdited(mem.result.sessions),
-    requests: computeTotalRequests(mem.result.sessions),
+    ...computeSessionTotals(mem.result.sessions),
   });
   return { result: mem.result, dirMetas: currentMetas };
 }
@@ -356,27 +297,25 @@ async function tryDiskCache(
   report({
     phase: 1, detail: 'Loaded from cache', pct: pct(1, 1),
     sessions: cached.result.sessions.length,
-    linesOfCode: computeTotalLoc(cached.result.sessions),
-    toolCalls: computeTotalToolCalls(cached.result.sessions),
-    imagesAnalyzed: computeTotalImages(cached.result.sessions),
-    filesEdited: computeTotalFilesEdited(cached.result.sessions),
-    requests: computeTotalRequests(cached.result.sessions),
+    ...computeSessionTotals(cached.result.sessions),
   });
   return { result: cached.result, dirMetas: currentMetas };
 }
 
-async function processWorkspaces(
+interface WorkspaceWorkItem {
+  logsDir: string;
+  wsId: string;
+  harness: string;
+  mtime: number;
+  workspaceKey: string;
+  sessionTiles: Array<{ mtime: number; size: number; date?: string }>;
+}
+
+/** Enumerate workspace folders, stat them for dates, and collect their session tiles, sorted chronologically. */
+async function buildWorkspaceWorkList(
   entries: { logsDir: string; dirEntries: fs.Dirent[] }[],
-  totalDirs: number,
-  ctx: ParseContext,
-  onProgress?: ProgressCallback,
-  isColdParse = true,
-): Promise<void> {
-  const effectiveMaxPrefetch = isColdParse
-    ? Math.min(COLD_PARSE_MAX_PREFETCH_FILES, MAX_PREFETCH_FILES)
-    : MAX_PREFETCH_FILES;
-  const effectiveMaxPrefetchBytes = isColdParse ? COLD_PARSE_MAX_PREFETCH_BYTES : MAX_PREFETCH_BYTES;
-  const work: { logsDir: string; wsId: string; harness: string; mtime: number; workspaceKey: string; sessionTiles: Array<{ mtime: number; size: number; date?: string }> }[] = [];
+): Promise<WorkspaceWorkItem[]> {
+  const work: WorkspaceWorkItem[] = [];
   for (const { logsDir, dirEntries } of entries) {
     const harness = harnessFromPath(logsDir);
     for (const d of dirEntries) work.push({ logsDir, wsId: d.name, harness, mtime: 0, workspaceKey: makeWorkspaceGroupKey(harness, d.name), sessionTiles: [] });
@@ -396,6 +335,11 @@ async function processWorkspaces(
 
   // Sort by date so the loading graph fills in chronologically
   work.sort((a, b) => a.mtime - b.mtime);
+  return work;
+}
+
+/** Flatten the work list into the ordered loading-plan keys consumed by the webview grid. */
+function buildWorkspacePlan(work: WorkspaceWorkItem[]): string[] {
   const planItems: string[] = [];
   let planOrder = 0;
   for (const item of work) {
@@ -403,6 +347,22 @@ async function processWorkspaces(
       planItems.push(makeWorkspaceProgressKey(item.workspaceKey, item.wsId, planOrder++, tile.date, tile.size));
     }
   }
+  return planItems;
+}
+
+async function processWorkspaces(
+  entries: { logsDir: string; dirEntries: fs.Dirent[] }[],
+  totalDirs: number,
+  ctx: ParseContext,
+  onProgress?: ProgressCallback,
+  isColdParse = true,
+): Promise<void> {
+  const effectiveMaxPrefetch = isColdParse
+    ? Math.min(COLD_PARSE_MAX_PREFETCH_FILES, MAX_PREFETCH_FILES)
+    : MAX_PREFETCH_FILES;
+  const effectiveMaxPrefetchBytes = isColdParse ? COLD_PARSE_MAX_PREFETCH_BYTES : MAX_PREFETCH_BYTES;
+  const work = await buildWorkspaceWorkList(entries);
+  const planItems = buildWorkspacePlan(work);
 
   // Build the workspace-level loading plan in processing order.
   if (onProgress && planItems.length > 0) {
@@ -419,26 +379,10 @@ async function processWorkspaces(
   let processed = 0;
   let lastLocIndex = 0;
   let strippedUpTo = 0;
-  let runningLoc = 0;
-  let runningToolCalls = 0;
-  let runningImages = 0;
-  let runningFilesEdited = 0;
-  let runningRequests = 0;
-  const seenFiles = new Set<string>();
+  const running = createRunningTotals();
 
-  function updateRunningStats(): void {
-    for (let si = lastLocIndex; si < ctx.sessions.length; si++) {
-      for (const req of ctx.sessions[si].requests) {
-        for (const block of req.aiCode) runningLoc += block.loc;
-        runningToolCalls += req.toolsUsed.length;
-        runningImages += req.variableKinds['image'] || 0;
-        for (const f of req.editedFiles) {
-          if (!seenFiles.has(f)) { seenFiles.add(f); runningFilesEdited++; }
-        }
-        runningRequests++;
-      }
-    }
-    lastLocIndex = ctx.sessions.length;
+  function foldNewSessions(): void {
+    for (; lastLocIndex < ctx.sessions.length; lastLocIndex++) running.add(ctx.sessions[lastLocIndex]);
   }
 
   try {
@@ -456,16 +400,17 @@ async function processWorkspaces(
         try {
           lastWsName = await processWorkspaceEntryAsync(logsDir, wsId, harness, ctx, (progress) => {
             if (!onProgress) return;
+            const totals = running.snapshot();
             onProgress({
               phase: 2,
               detail: `workspace ${processed + 1}/${totalDirs}: ${progress.wsName} — ${progress.detail}`,
               pct: pct(2, (processed + (progress.completed / progress.total)) / totalDirs),
               sessions: ctx.sessions.length,
-              linesOfCode: runningLoc,
-              toolCalls: runningToolCalls,
-              imagesAnalyzed: runningImages,
-              filesEdited: runningFilesEdited,
-              requests: runningRequests,
+              linesOfCode: totals.linesOfCode,
+              toolCalls: totals.toolCalls,
+              imagesAnalyzed: totals.imagesAnalyzed,
+              filesEdited: totals.filesEdited,
+              requests: totals.requests,
             });
           });
         } catch (e) {
@@ -475,7 +420,7 @@ async function processWorkspaces(
         const elapsed = Date.now() - start;
 
         // Incrementally compute stats from newly added sessions
-        updateRunningStats();
+        foldNewSessions();
 
         // Eagerly strip the heavy text (responseText, oversized messageText) from sessions as
         // soon as their stats are computed, instead of holding every session's full content in
@@ -488,7 +433,11 @@ async function processWorkspaces(
         strippedUpTo = ctx.sessions.length;
 
         processed++;
-        await reportWorkspaceProgress(onProgress, processed, totalDirs, lastWsName, elapsed, ctx.sessions.length, workspaceKey, runningLoc, runningToolCalls, runningImages, runningFilesEdited, runningRequests);
+        await reportWorkspaceProgress(
+          onProgress,
+          { processed, totalDirs, lastWsName, elapsed, sessions: ctx.sessions.length, workspaceKey },
+          running.snapshot(),
+        );
       }
 
       await nextPrefetch;
@@ -651,11 +600,7 @@ export async function parseAllLogsAsyncDetailed(
       detail: `Updating ${stalePaths.length} changed workspace(s)`,
       pct: pct(2, 0),
       sessions: freshSessions.length,
-      linesOfCode: computeTotalLoc(freshSessions),
-      toolCalls: computeTotalToolCalls(freshSessions),
-      imagesAnalyzed: computeTotalImages(freshSessions),
-      filesEdited: computeTotalFilesEdited(freshSessions),
-      requests: computeTotalRequests(freshSessions),
+      ...computeSessionTotals(freshSessions),
       workspacePlan: stalePlan,
     });
 
@@ -712,145 +657,6 @@ export async function parseAllLogsAsync(
   return result;
 }
 
-export async function parseAllLogsViaWorker(
-  logsDirs: string[],
-  onProgress?: ProgressCallback,
-): Promise<ParseResult> {
-  let forkFn: typeof import('child_process').fork;
-  try {
-    ({ fork: forkFn } = await import('child_process'));
-  } catch {
-    runtimeDebug('parser', 'child-process-unavailable');
-    throw new Error('child process parsing is unavailable on this runtime');
-  }
-
-  const workerPath = path.join(__dirname, 'parse-worker.js');
-  const runChildAttempt = (maxOldSpaceMb: number, attempt: number): Promise<ParseResult> => {
-    runtimeDebug('parser', 'child-start', `attempt=${attempt} logsDirs=${logsDirs.length} worker=${workerPath} maxOldSpaceMb=${maxOldSpaceMb}`);
-
-    return new Promise((resolve, reject) => {
-      const TIMEOUT_MS = 10 * 60_000;
-      let child: import('child_process').ChildProcess;
-      try {
-        child = forkFn(workerPath, [], {
-          execArgv: [
-            `--max-old-space-size=${maxOldSpaceMb}`,
-            // Expose global.gc so the worker can proactively reclaim transient parse garbage
-            // before RSS reaches Electron's ~2GB allocator OOM ceiling (issue #106).
-            '--expose-gc',
-          ],
-        });
-      } catch {
-        runtimeDebug('parser', 'child-constructor-failed', `attempt=${attempt}`);
-        reject(new Error('failed to start parse worker child process'));
-        return;
-      }
-
-      let lastPhase = -1;
-      let lastWorkspaceLogged = 0;
-      let settled = false;
-
-      // Chunked-IPC assembler (issue #106, S1). Declared per-attempt so a retry starts fresh.
-      const assembler = new ChunkAssembler();
-
-      const finish = (fn: () => void): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        child.kill();
-        fn();
-      };
-
-      const fail = (reason: string): void => {
-        finish(() => reject(new Error(reason)));
-      };
-
-      const timer = setTimeout(() => {
-        runtimeDebug('parser', 'child-timeout', `attempt=${attempt} timeoutMs=${TIMEOUT_MS}`);
-        fail('parse worker timeout (10m)');
-      }, TIMEOUT_MS);
-
-      child.on('message', (msg: { type: 'progress'; progress: LoadProgress } | { type: 'chunk'; seq: number; payload: WorkerChunkPayload } | { type: 'done'; payload: WorkerDoneMessagePayload } | { type: 'error'; message?: string }) => {
-        if (msg.type === 'progress') {
-          if (msg.progress.phase !== lastPhase) {
-            lastPhase = msg.progress.phase;
-            runtimeDebug('parser', 'child-progress-phase', `attempt=${attempt} phase=${msg.progress.phase} detail=${msg.progress.detail || ''}`);
-          }
-          const match = msg.progress.detail?.match(/^(\d+)\/(\d+):/);
-          if (match) {
-            const current = Number(match[1]);
-            const total = Number(match[2]);
-            if (current >= lastWorkspaceLogged + 25 || current === total) {
-              lastWorkspaceLogged = current;
-              runtimeDebug('parser', 'child-progress-workspaces', `attempt=${attempt} ${current}/${total}`);
-            }
-          }
-          onProgress?.(msg.progress);
-          return;
-        }
-
-        if (msg.type === 'chunk') {
-          assembler.addChunk(msg.payload);
-          // Ack so the worker can release its in-flight window and emit the next chunk. Without
-          // this backpressure the worker flushed the whole result into its native IPC buffer and
-          // aborted with a native OOM (issue #106).
-          try {
-            child.send({ type: 'ack', seq: msg.seq });
-          } catch {
-            // Child already gone; the exit handler will settle the attempt.
-          }
-          return;
-        }
-
-        if (msg.type === 'done') {
-          const assembled = assembler.finish(msg.payload);
-          runtimeDebug('parser', 'child-done', `attempt=${attempt} chunks=${assembler.chunkCount} workspaces=${msg.payload.workspaces.length} sessions=${assembled.sessions.length}`);
-          logParseWarnings(msg.payload.parseWarnings);
-          finish(() => {
-            const result: ParseResult = {
-              workspaces: assembled.workspaces,
-              sessions: assembled.sessions,
-              editLocIndex: assembled.editLocIndex,
-              sessionSourceIndex: assembled.sessionSourceIndex,
-              parseWarnings: msg.payload.parseWarningCounts ?? { skippedFiles: 0, skippedLines: 0 },
-            };
-            setMemoryCache(result, msg.payload.dirMetas);
-            // Child already sent the stripped representation, but keep this idempotent.
-            stripSessionsForMemory(result.sessions);
-            resolve(result);
-          });
-          return;
-        }
-
-        const message = msg.message || 'parse worker failed';
-        runtimeDebug('parser', 'child-error-message', `attempt=${attempt} ${message}`);
-        fail(message);
-      });
-
-      child.on('error', (err: Error) => {
-        runtimeDebug('parser', 'child-error-event', `attempt=${attempt} ${err.message}`);
-        fail(err.message);
-      });
-
-      child.on('exit', (code, signal) => {
-        runtimeDebug('parser', 'child-exit', `attempt=${attempt} code=${code} signal=${signal || ''}`.trim());
-        if (!settled) {
-          const reason = signal ? `Child process killed by ${signal}` : `Child process exited with code ${code}`;
-          fail(reason);
-        }
-      });
-
-      child.send({ logsDirs });
-    });
-  };
-
-  try {
-    return await runChildAttempt(WORKER_MAX_OLD_SPACE_MB, 1);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const retryable = /heap out of memory|memory limit|sigabrt|sigkill|exited with code/i.test(message.toLowerCase());
-    if (!retryable) throw error;
-    runtimeDebug('parser', 'child-retry', `reason=${message} maxOldSpaceMb=${RETRY_WORKER_MAX_OLD_SPACE_MB}`);
-    return runChildAttempt(RETRY_WORKER_MAX_OLD_SPACE_MB, 2);
-  }
-}
+/* The out-of-process worker host lives in its own module to isolate the child-process/IPC
+ * concern; re-exported here so existing importers of `./parser` keep working. */
+export { parseAllLogsViaWorker } from './parser-worker-host';
