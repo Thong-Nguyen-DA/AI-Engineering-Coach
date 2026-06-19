@@ -52,33 +52,9 @@ AI Engineer Coach reads your local AI session logs and turns them into actionabl
 
 ## Installation
 
-Choose one of these paths.
+The extension is not published to a marketplace or Releases page, so you build the `.vsix` yourself and install it. Pick whichever build path fits your setup.
 
-### Path 1 -- Prebuilt VSIX (easiest)
-
-Prerequisites:
-
-- VS Code
-- Access to the repository Releases page
-
-Steps:
-
-1. Download the latest `ai-engineer-coach-*.vsix` from Releases.
-2. Install it in VS Code:
-
-**macOS / Linux**
-
-```bash
-code --install-extension ai-engineer-coach-*.vsix
-```
-
-**Windows / PowerShell**
-
-```powershell
-code --install-extension (Get-ChildItem . -Filter 'ai-engineer-coach-*.vsix' | Select-Object -First 1).FullName
-```
-
-### Path 2 -- Dev Container build (no local Node.js/npm)
+### Path 1 -- Dev Container build (no local Node.js/npm)
 
 Prerequisites:
 
@@ -97,14 +73,9 @@ npm ci
 npm run package
 ```
 
-4. Install the generated `.vsix` using one of the commands above.
-If it doesn't work simply Install it via VS Code UI:
-Open VS Code
-Press Ctrl+Shift+P
-Type Install from VSIX
-Browse to the .vsix file and select it
+4. Install the generated `.vsix` (see [Install the built VSIX](#install-the-built-vsix) below).
 
-### Path 3 -- Local build
+### Path 2 -- Local build
 
 Prerequisites:
 
@@ -120,17 +91,50 @@ npm ci
 npm run package
 ```
 
-Then install the generated `.vsix` using one of the commands above.
+Then install the generated `.vsix` (see below).
 
-### Release permissions and contribution path
+### Install the built VSIX
 
-If you do not have permission to publish a Release artifact, open a PR with your changes and ask a maintainer to publish the `.vsix` in Releases.
+**macOS / Linux**
+
+```bash
+code --install-extension ai-engineer-coach-*.vsix
+```
+
+**Windows / PowerShell**
+
+```powershell
+code --install-extension (Get-ChildItem . -Filter 'ai-engineer-coach-*.vsix' | Select-Object -First 1).FullName
+```
+
+If the CLI does not work, install it from the VS Code UI: press `Ctrl+Shift+P`, type **Install from VSIX**, then browse to the `.vsix` file and select it.
 
 After install:
 
 1. Open the command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
 2. Run **AI Engineer Coach: Open Dashboard**
 3. Navigate pages from the sidebar, filter by workspace or harness
+
+---
+
+## Run as a canvas in the GitHub Copilot app
+
+The same dashboard also runs as a canvas inside the GitHub Copilot app, so you do not need VS Code to use it.
+
+A canvas is an interactive side panel in the GitHub Copilot app. Rather than replying only in chat, the agent can open a canvas to show rich, task-specific UI that you view and interact with directly while you keep working. Extensions register their own canvases, and this repo ships one named **AI Engineer Coach** under [`.github/extensions/ai-engineer-coach/`](.github/extensions/ai-engineer-coach/). It reuses the exact webview bundle from the VS Code extension and parses your local session logs in process, so nothing leaves your machine.
+
+To open it:
+
+1. Clone this repo and open it as a project in the GitHub Copilot app.
+2. Build the project once:
+
+```bash
+npm install && npm run build
+```
+
+3. Open the **AI Engineer Coach** canvas. On a fresh clone it shows a setup card with the build command and reloads into the full dashboard once the build finishes. No manual reopen needed.
+
+A few features depend on the local VS Code language model and are hidden in canvas mode: **Skill Finder**, **Learning Center**, the **Level Up** section, and the **Context Health** AI review. Everything driven by your on-disk logs (Dashboard, Timeline, Coding Moments, Output, Patterns, Anti-Patterns) works the same. App sessions show up as **GitHub Copilot App** and terminal sessions as **GitHub Copilot CLI** in the harness breakdown.
 
 ---
 
