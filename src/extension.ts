@@ -112,6 +112,9 @@ export function activate(context: vscode.ExtensionContext) {
   const outputChannel = vscode.window.createOutputChannel('AI Engineer Coach');
   context.subscriptions.push(outputChannel);
   setOutputHook((msg) => outputChannel.appendLine(msg));
+  context.subscriptions.push(
+    vscode.commands.registerCommand('aiEngineerCoach.showOutput', () => outputChannel.show(true)),
+  );
 
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 

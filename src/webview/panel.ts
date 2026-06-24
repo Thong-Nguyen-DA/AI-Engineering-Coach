@@ -131,6 +131,13 @@ export class DashboardPanel {
     DashboardSidebarProvider.instance?.refresh();
   }
 
+  /** Authoritative skipped-file/line counts from the parse, sent with `dataReady` so the webview
+   *  banner does not depend on a throttled progress tick (which never fires on a cache hit). */
+  private skippedCounts(): { skippedFiles: number; skippedLines: number } {
+    const w = this.parseResult?.parseWarnings;
+    return { skippedFiles: w?.skippedFiles ?? 0, skippedLines: w?.skippedLines ?? 0 };
+  }
+
   private async loadData(): Promise<void> {
     this.loading = true;
     const t0 = Date.now();
@@ -195,7 +202,7 @@ export class DashboardPanel {
         this.analyzer = panelCache.analyzerInstance;
         this.updateSidebarStats();
         this.dataReady = true;
-        safePost({ type: 'dataReady', currentWorkspace: vscode.workspace.name || '' });
+        safePost({ type: 'dataReady', currentWorkspace: vscode.workspace.name || '', ...this.skippedCounts() });
         return;
       }
 
@@ -241,7 +248,7 @@ export class DashboardPanel {
       // are handled immediately instead of being queued behind warmUp().
       this.dataReady = true;
 
-      safePost({ type: 'dataReady', currentWorkspace: vscode.workspace.name || '' });
+      safePost({ type: 'dataReady', currentWorkspace: vscode.workspace.name || '', ...this.skippedCounts() });
       runtimeDebug('panel', 'data-ready-sent', `elapsedMs=${Date.now() - t0}`);
 
       try {
@@ -274,6 +281,13 @@ export class DashboardPanel {
     // Open external URLs from webview
     if (msg.method === 'openExternal') {
       this.handleOpenExternal(msg);
+      return;
+    }
+
+    // Reveal the "AI Engineer Coach" output channel (e.g. from the skipped-history banner).
+    if (msg.method === 'showOutput') {
+      void vscode.commands.executeCommand('aiEngineerCoach.showOutput');
+      postResponse(this.panel.webview, msg.id, { ok: true });
       return;
     }
 

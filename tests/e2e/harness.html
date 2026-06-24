@@ -421,11 +421,39 @@ window.getMockData = getMockData;
 </script>
 <script src="/dist/webview/app.js"></script>
 <script>
-setTimeout(() => {
-  window.dispatchEvent(new MessageEvent('message', {
-    data: { type: 'dataReady' }
-  }));
-}, 50);
+// In ?mode=loading the harness keeps the loading screen up and streams a parse-progress message
+// carrying resource telemetry, so e2e can assert the telemetry strip renders (issue #106).
+// Otherwise it signals dataReady to reveal the dashboard.
+const __mode = new URLSearchParams(window.location.search).get('mode');
+if (__mode === 'loading') {
+  // Re-dispatch on an interval so the message is caught once app.js finishes attaching its
+  // listener (the Chart.js bundle can take >50ms to evaluate), and to mimic the worker streaming
+  // periodic telemetry updates. Never sends dataReady, so the loading screen stays up.
+  const __progress = {
+    type: 'progress',
+    phase: 2,
+    phaseLabel: 'Parsing session logs',
+    pct: 47,
+    sessions: 1280,
+    workspaces: 9,
+    telemetry: {
+      rssMB: 1536,
+      heapUsedMB: 2200,
+      heapLimitMB: 4096,
+      fileBufMB: 320,
+      cpuPct: 78
+    }
+  };
+  setInterval(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: __progress }));
+  }, 100);
+} else {
+  setTimeout(() => {
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'dataReady' }
+    }));
+  }, 50);
+}
 </script>
 </body>
 </html>

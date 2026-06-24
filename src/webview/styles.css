@@ -71,6 +71,16 @@ body {
   width: 100%;
 }
 
+/* Vertical column holding the optional skipped-history banner above the page content. */
+#content-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
 /* ---- Sidebar ---- */
 #sidebar {
   width: 220px;
@@ -360,10 +370,10 @@ body {
 /* ---- Main Content ---- */
 #content {
   flex: 1;
+  min-height: 0;
   padding: 24px 28px;
   overflow-y: auto;
   max-width: 1200px;
-  height: 100vh;
 }
 
 h1 {
@@ -2460,6 +2470,178 @@ h2 {
 .ticker-value {
   font-weight: 700;
   color: var(--text);
+}
+
+/* ---- Live worker telemetry strip (memory / CPU / buffers) ---- */
+.loading-telemetry {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 14%, var(--border));
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent-blue) 7%, var(--surface, #161b22)),
+    color-mix(in srgb, var(--accent-blue) 3%, var(--surface, #161b22)));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 0.4s ease, box-shadow 0.4s ease;
+}
+.loading-telemetry:empty {
+  display: none;
+}
+.loading-telemetry.tg-pressure {
+  border-color: color-mix(in srgb, var(--accent-red, #f14c4c) 55%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-red, #f14c4c) 30%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.tg-gauge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 14px 4px 4px;
+  border-right: 1px solid color-mix(in srgb, var(--accent-blue) 10%, var(--border));
+}
+.tg-ringwrap {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+}
+.tg-ring {
+  width: 52px;
+  height: 52px;
+  display: block;
+}
+.tg-track {
+  fill: none;
+  stroke: color-mix(in srgb, var(--text-muted) 22%, transparent);
+  stroke-width: 6;
+}
+.tg-arc {
+  fill: none;
+  stroke: var(--accent-blue);
+  stroke-width: 6;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.5s ease, stroke 0.5s ease;
+}
+.tg-ringpct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.tg-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.tg-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.tg-value {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-transform: capitalize;
+}
+.tg-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.tg-tiles {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex: 1;
+  flex-wrap: wrap;
+  padding-left: 4px;
+}
+.tg-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tg-tile-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.tg-tile-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.tg-tile-warn .tg-tile-label,
+.tg-tile-warn .tg-tile-value {
+  color: var(--accent-amber, #d7a000);
+}
+
+/* ---- Post-load "some history skipped" banner ---- */
+.skipped-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 16px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent-amber, #d7a000) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent-amber, #d7a000) 10%, var(--surface, #161b22));
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.skipped-banner-icon {
+  flex-shrink: 0;
+  color: var(--accent-amber, #d7a000);
+}
+.skipped-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.skipped-banner-link {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--accent-blue);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.skipped-banner-link:hover {
+  color: var(--text);
+}
+.skipped-banner-dismiss {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 6px;
+}
+.skipped-banner-dismiss:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
 }
 
 /* ---- Progress checklist ---- */

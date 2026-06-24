@@ -3,8 +3,11 @@
  *  Licensed under the MIT License. See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { describe, it, expect } from 'vitest';
-import { detectDevcontainerFromRequests, extractSkillPathsFromText, createRequest, createSession } from './parser-shared';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  detectDevcontainerFromRequests, extractSkillPathsFromText, createRequest, createSession,
+  recordFailedFile, recordSkippedLines, getParseWarningCounts, getParseWarnings, resetParseWarnings,
+} from './parser-shared';
 import { SessionRequest } from './types';
 
 function makeReq(overrides: Partial<SessionRequest> = {}): SessionRequest {
@@ -41,6 +44,39 @@ function makeReq(overrides: Partial<SessionRequest> = {}): SessionRequest {
     ...overrides,
   };
 }
+
+describe('parse-warning collector', () => {
+  beforeEach(() => resetParseWarnings());
+
+  it('starts empty', () => {
+    expect(getParseWarningCounts()).toEqual({ skippedFiles: 0, skippedLines: 0 });
+    expect(getParseWarnings()).toEqual([]);
+  });
+
+  it('records failed files with scope, path, and reason', () => {
+    recordFailedFile('parser-vscode', '/logs/ws/a.json', new Error('boom'));
+    recordFailedFile('parser-vscode-cli', '/logs/ws/events.jsonl', 'plain string reason');
+    expect(getParseWarningCounts().skippedFiles).toBe(2);
+    expect(getParseWarnings()).toEqual([
+      { scope: 'parser-vscode', file: '/logs/ws/a.json', reason: 'boom' },
+      { scope: 'parser-vscode-cli', file: '/logs/ws/events.jsonl', reason: 'plain string reason' },
+    ]);
+  });
+
+  it('accumulates skipped lines independently of failed files', () => {
+    recordSkippedLines();
+    recordSkippedLines(4);
+    expect(getParseWarningCounts()).toEqual({ skippedFiles: 0, skippedLines: 5 });
+  });
+
+  it('reset clears counts and the detail list', () => {
+    recordFailedFile('parser', '/logs/x', 'e');
+    recordSkippedLines(3);
+    resetParseWarnings();
+    expect(getParseWarningCounts()).toEqual({ skippedFiles: 0, skippedLines: 0 });
+    expect(getParseWarnings()).toEqual([]);
+  });
+});
 
 describe('detectDevcontainerFromRequests', () => {
   it('returns false when no signal is present', () => {

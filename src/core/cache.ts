@@ -17,12 +17,16 @@ import { Session, Workspace } from './types';
 import { warnCore } from './log';
 import { parseSessionFile } from './parser-vscode';
 import { parseCLIEventsFile } from './parser-vscode-cli';
+import { stripSingleSession } from './parser-shared';
 
 export interface ParseResult {
   workspaces: Map<string, Workspace>;
   sessions: Session[];
   editLocIndex: Map<string, Map<string, number>>;
   sessionSourceIndex: Map<string, SessionSource>;
+  /** Counts of session files / lines the parser had to skip. Surfaced as a post-load banner so a
+   *  partial parse is discoverable. Absent on cold disk-cache restores (no parse ran). */
+  parseWarnings?: { skippedFiles: number; skippedLines: number };
 }
 
 export interface SessionSource {
@@ -394,30 +398,21 @@ export function clearCache(): void {
 /* ---- Memory-efficient in-RAM representation ---- */
 
 /**
- * Maximum chars to keep in memory for messageText.
- * Enough for all regex-based classification (work-type, intent, spec-detection,
- * profanity scanning, prompt grading) while saving ~95% of text memory.
- */
-const MEMORY_PREVIEW_CHARS = 500;
-
-/**
  * Strip text fields from sessions to reduce in-memory footprint.
- * - messageText is truncated to MEMORY_PREVIEW_CHARS (enough for all analytics).
- * - responseText is cleared entirely (only needed for session detail view, loaded from disk on demand).
- * - todoSnapshot is dropped (only used in session detail).
+ *
+ * Delegates to stripSingleSession() (defined in parser-shared) so the same stripping rules
+ * apply whether sessions are stripped eagerly during parse (issue #106) or in bulk here.
+ *
+ * VS Code / CLI sessions are stripped eagerly during parse, so this is idempotent for them.
+ * External-harness sessions (Claude/Codex/OpenCode, Xcode) are collected after the main
+ * parse loop and are stripped here.
  *
  * Call this after saving the full data to disk cache and before handing
  * sessions to the Analyzer.
  */
 export function stripSessionsForMemory(sessions: Session[]): void {
   for (const s of sessions) {
-    for (const r of s.requests) {
-      if (r.messageText.length > MEMORY_PREVIEW_CHARS) {
-        r.messageText = r.messageText.substring(0, MEMORY_PREVIEW_CHARS);
-      }
-      r.responseText = '';
-      if (r.todoSnapshot) r.todoSnapshot = null;
-    }
+    stripSingleSession(s);
   }
 }
 

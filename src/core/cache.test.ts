@@ -21,7 +21,7 @@ import {
   ParseResult,
 } from './cache';
 import { Session } from './types';
-import { createRequest, createSession } from './parser-shared';
+import { createRequest, createSession, stripSingleSession } from './parser-shared';
 
 const tempDirs: string[] = [];
 
@@ -95,6 +95,48 @@ describe('stripSessionsForMemory', () => {
     stripSessionsForMemory([session]);
     expect(session.requests[0].messageText).toBe('short msg');
     expect(session.requests[0].responseText).toBe('');
+  });
+});
+
+describe('stripSingleSession', () => {
+  it('truncates messageText to 500 chars, clears responseText, nulls todoSnapshot', () => {
+    const session = makeSession();
+    stripSingleSession(session);
+    const request = session.requests[0];
+    expect(request.messageText.length).toBe(500);
+    expect(request.responseText).toBe('');
+    expect(request.todoSnapshot).toBeNull();
+  });
+
+  it('preserves length metadata and structured fields', () => {
+    const session = makeSession();
+    const request = session.requests[0];
+    const originalMessageLength = request.messageLength;
+    const originalResponseLength = request.responseLength;
+    stripSingleSession(session);
+    expect(request.messageLength).toBe(originalMessageLength);
+    expect(request.responseLength).toBe(originalResponseLength);
+    expect(request.toolConfirmations).toHaveLength(1);
+    expect(request.toolConfirmations[0].commandLine).toBe('npm test');
+  });
+
+  it('is idempotent (a second call changes nothing)', () => {
+    const session = makeSession();
+    stripSingleSession(session);
+    const afterFirst = JSON.stringify(session);
+    stripSingleSession(session);
+    expect(JSON.stringify(session)).toBe(afterFirst);
+  });
+
+  it('handles an empty requests array', () => {
+    const session = createSession({
+      sessionId: 's3',
+      workspaceId: 'ws3',
+      workspaceName: 'workspace',
+      harness: 'Local Agent',
+      requests: [],
+    });
+    expect(() => stripSingleSession(session)).not.toThrow();
   });
 });
 

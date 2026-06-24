@@ -305,6 +305,8 @@
     "analyze:e2e-real-data": "npx tsx scripts/e2e-real-data.ts",
     "analyze:catalog-fetch": "node scripts/test-catalog-fetch.mjs",
     "smoke-test": "node scripts/smoke-test.mjs",
+    "gen-synth-logs": "npx tsx scripts/generate-synthetic-logs.ts",
+    "test:oom-synth": "npx tsx scripts/oom-repro.ts",
     "package": "node scripts/package-readme-swap.mjs",
     "spellcheck": "cspell \"src/**/*.ts\" \"docs/**/*.md\" \"*.md\"",
     "knip": "knip",

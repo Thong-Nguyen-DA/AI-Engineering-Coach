@@ -5,7 +5,9 @@
 
 /* File reconstruction and workspace metadata helpers for VS Code session parsing. */
 
-import { assertTrustedPath, prefetchCache, readFileSafe } from './parser-shared';
+import * as fs from 'fs';
+import { StringDecoder } from 'string_decoder';
+import { assertTrustedPath, prefetchCache, readFileSafe, recordFailedFile, recordSkippedLines } from './parser-shared';
 import { fileUriToPath } from './helpers';
 import { debugCore, warnCore } from './log';
 
@@ -22,6 +24,128 @@ export function readFile(fpath: string): string {
   if (content === null) throw new Error(`File unreadable or exceeds size cap: ${fpath}`);
   return content;
 }
+
+// Chunk size for streaming JSONL line reads. Bounds the transient allocation to ~this size plus
+// the longest single line, instead of the whole file (issue #106).
+const JSONL_READ_CHUNK = 1024 * 1024;
+
+/**
+ * Invoke `onLine` for each newline-delimited line in a (possibly very large) JSONL file, reading
+ * the file in fixed-size chunks rather than loading it whole.
+ *
+ * Reading a multi-hundred-MB / multi-GB file with `fs.readFileSync` + `raw.split('\n')` requests
+ * one giant allocation (the file string, then a second copy for the split). Inside Electron's
+ * embedded V8 that trips Chromium's PartitionAlloc out-of-memory guard, which hard-aborts the
+ * process (exit 0xE0000008) with no catchable error and no Node fatal report (issue #106).
+ * Streaming keeps peak transient memory bounded by the chunk size and the longest line.
+ *
+ * Lines are emitted WITHOUT their trailing '\n'. A final non-empty line with no trailing newline
+ * is emitted too. Multibyte UTF-8 sequences split across chunk boundaries are handled correctly.
+ */
+export function forEachJsonlLine(fpath: string, onLine: (line: string) => void): void {
+  assertTrustedPath(fpath);
+  // Small prefetched files are already in memory — iterate them directly without a second read.
+  const cached = prefetchCache.get(fpath);
+  if (cached !== undefined) {
+    prefetchCache.delete(fpath);
+    let start = 0;
+    let nl = cached.indexOf('\n');
+    while (nl >= 0) {
+      onLine(cached.slice(start, nl));
+      start = nl + 1;
+      nl = cached.indexOf('\n', start);
+    }
+    if (start < cached.length) onLine(cached.slice(start));
+    return;
+  }
+
+  const fd = fs.openSync(fpath, 'r');
+  try {
+    const decoder = new StringDecoder('utf8');
+    const buf = Buffer.allocUnsafe(JSONL_READ_CHUNK);
+    let pending = '';
+    let bytesRead: number;
+    while ((bytesRead = fs.readSync(fd, buf, 0, JSONL_READ_CHUNK, null)) > 0) {
+      pending += decoder.write(buf.subarray(0, bytesRead));
+      const parts = pending.split('\n');
+      // The last element is an incomplete line (or '') — carry it to the next chunk.
+      pending = parts.pop() ?? '';
+      for (const line of parts) onLine(line);
+    }
+    pending += decoder.end();
+    if (pending.length > 0) onLine(pending);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Yield every this many bytes while streaming, so a very large file (e.g. a 1+ GB events.jsonl)
+// does not monopolize the worker event loop for minutes — letting memory ticks fire, IPC drain,
+// and the host progress bar advance smoothly instead of freezing (issue #106 seamlessness).
+const JSONL_YIELD_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Async sibling of {@link forEachJsonlLine}. Identical streaming semantics, but periodically
+ * yields to the event loop and reports byte progress via `onProgress(bytesRead, totalBytes)`.
+ *
+ * Use this on the cold-parse path for files that may be very large: the synchronous version
+ * blocks the worker for the entire file (no progress, no responsiveness), whereas this keeps the
+ * worker live and lets the host render incremental progress through a single huge file.
+ */
+export async function forEachJsonlLineAsync(
+  fpath: string,
+  onLine: (line: string) => void,
+  onProgress?: (bytesRead: number, totalBytes: number) => void,
+): Promise<void> {
+  assertTrustedPath(fpath);
+  // Small prefetched files are already in memory — iterate them directly without a second read.
+  const cached = prefetchCache.get(fpath);
+  if (cached !== undefined) {
+    prefetchCache.delete(fpath);
+    let start = 0;
+    let nl = cached.indexOf('\n');
+    while (nl >= 0) {
+      onLine(cached.slice(start, nl));
+      start = nl + 1;
+      nl = cached.indexOf('\n', start);
+    }
+    if (start < cached.length) onLine(cached.slice(start));
+    onProgress?.(cached.length, cached.length);
+    return;
+  }
+
+  const fd = fs.openSync(fpath, 'r');
+  try {
+    const totalBytes = fs.fstatSync(fd).size;
+    const decoder = new StringDecoder('utf8');
+    const buf = Buffer.allocUnsafe(JSONL_READ_CHUNK);
+    let pending = '';
+    let totalRead = 0;
+    let sinceYield = 0;
+    let bytesRead: number;
+    while ((bytesRead = fs.readSync(fd, buf, 0, JSONL_READ_CHUNK, null)) > 0) {
+      totalRead += bytesRead;
+      sinceYield += bytesRead;
+      pending += decoder.write(buf.subarray(0, bytesRead));
+      const parts = pending.split('\n');
+      // The last element is an incomplete line (or '') — carry it to the next chunk.
+      pending = parts.pop() ?? '';
+      for (const line of parts) onLine(line);
+      if (sinceYield >= JSONL_YIELD_BYTES) {
+        sinceYield = 0;
+        onProgress?.(totalRead, totalBytes);
+        // Hand the event loop back so memory ticks / IPC / host progress are not starved.
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+    }
+    pending += decoder.end();
+    if (pending.length > 0) onLine(pending);
+    onProgress?.(totalBytes, totalBytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 
 function skipQuotedString(raw: string, start: number): number {
   let i = start + 1;
@@ -202,51 +326,39 @@ function appendAtPath(obj: JsonValue, keys: PathKey[], items: JsonValue): void {
 export function reconstructFromJsonl(fpath: string): Record<string, unknown> | null {
   let state: JsonObject = {};
   let initialModeId: string | undefined;
-  let lines: string[];
   try {
-    assertTrustedPath(fpath);
-    const cached = prefetchCache.get(fpath);
-    let raw: string;
-    if (cached !== undefined) {
-      prefetchCache.delete(fpath);
-      raw = cached;
-    } else {
-      // Bounded read (50 MB cap): the whole file is slurped into a string and a
-      // line array here, so an oversized/crafted file would OOM the host —
-      // especially on the on-demand getSessionDetail path (main thread).
-      const safe = readFileSafe(fpath);
-      if (safe === null) return null;
-      raw = safe;
-    }
-    lines = raw.split('\n');
+    // Stream the file line-by-line so a very large JSONL never forces a single whole-file (or
+    // split-copy) allocation that would trip Chromium's PartitionAlloc OOM guard (issue #106).
+    // Streaming inherently bounds peak allocation, removing the need for the prior 50 MB cap.
+    forEachJsonlLine(fpath, (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        const entry = JSON.parse(stripImageData(trimmed)) as { kind: number; k?: PathKey[]; v?: JsonValue };
+        if (entry.kind === 0) {
+          state = (entry.v || {}) as JsonObject;
+          // Capture the initial mode from the session start — VS Code may later
+          // patch inputState.mode to "agent" when executing, losing the original
+          // plan/edit/custom mode.  Preserve it so the parser can use it.
+          const is = state.inputState as JsonObject | undefined;
+          const mode = is?.mode as JsonObject | undefined;
+          if (typeof mode?.id === 'string') {
+            initialModeId = mode.id;
+          }
+        } else if (entry.kind === 1) {
+          setAtPath(state, entry.k || [], entry.v as JsonValue);
+        } else if (entry.kind === 2) {
+          appendAtPath(state, entry.k || [], entry.v as JsonValue);
+        }
+      } catch {
+        // Skip malformed lines, don't abort the entire file
+        recordSkippedLines();
+      }
+    });
   } catch (e) {
     warnCore('parser-vscode', `Failed to read JSONL file ${fpath}`, e);
+    recordFailedFile('parser-vscode', fpath, e);
     return null;
-  }
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const entry = JSON.parse(stripImageData(trimmed)) as { kind: number; k?: PathKey[]; v?: JsonValue };
-      if (entry.kind === 0) {
-        state = (entry.v || {}) as JsonObject;
-        // Capture the initial mode from the session start — VS Code may later
-        // patch inputState.mode to "agent" when executing, losing the original
-        // plan/edit/custom mode.  Preserve it so the parser can use it.
-        const is = state.inputState as JsonObject | undefined;
-        const mode = is?.mode as JsonObject | undefined;
-        if (typeof mode?.id === 'string') {
-          initialModeId = mode.id;
-        }
-      } else if (entry.kind === 1) {
-        setAtPath(state, entry.k || [], entry.v as JsonValue);
-      } else if (entry.kind === 2) {
-        appendAtPath(state, entry.k || [], entry.v as JsonValue);
-      }
-    } catch {
-      // Skip malformed lines, don't abort the entire file
-      continue;
-    }
   }
   if (Object.keys(state).length === 0) return null;
   // Restore the initial mode if it was overwritten by patches

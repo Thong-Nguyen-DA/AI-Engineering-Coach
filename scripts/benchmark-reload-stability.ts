@@ -54,7 +54,22 @@ function runChildParse(label: string, logsDirs: string[]): Promise<WorkerPayload
     const started = Date.now();
     let lastLogged = 0;
 
-    child.on('message', (msg: { type: string; progress?: { detail?: string }; payload?: WorkerPayload; message?: string }) => {
+    // Accumulators for the chunked IPC protocol (issue #106, S1).
+    const sessions: import('../src/core/types').Session[] = [];
+    const editLocEntries: Array<[string, Array<[string, number]>]> = [];
+    let workspaces: Array<[string, { id: string; name: string; path: string }]> = [];
+
+    child.on('message', (msg: {
+      type: string;
+      progress?: { detail?: string };
+      payload?: {
+        sessions?: import('../src/core/types').Session[];
+        editLocEntries?: Array<[string, Array<[string, number]>]>;
+        workspaces?: Array<[string, { id: string; name: string; path: string }]>;
+        orphanEditLoc?: Array<[string, Array<[string, number]>]>;
+      };
+      message?: string;
+    }) => {
       if (msg.type === 'progress') {
         const match = msg.progress?.detail?.match(/^(\d+)\/(\d+):/);
         if (!match) return;
@@ -67,10 +82,18 @@ function runChildParse(label: string, logsDirs: string[]): Promise<WorkerPayload
         return;
       }
 
-      if (msg.type === 'result' && msg.payload) {
+      if (msg.type === 'chunk' && msg.payload) {
+        if (msg.payload.sessions) for (const s of msg.payload.sessions) sessions.push(s);
+        if (msg.payload.editLocEntries) for (const e of msg.payload.editLocEntries) editLocEntries.push(e);
+        return;
+      }
+
+      if (msg.type === 'done' && msg.payload) {
+        if (msg.payload.workspaces) workspaces = msg.payload.workspaces;
+        if (msg.payload.orphanEditLoc) for (const e of msg.payload.orphanEditLoc) editLocEntries.push(e);
         console.log(`${label} result after ${((Date.now() - started) / 1000).toFixed(1)}s`);
         child.kill();
-        resolve(msg.payload);
+        resolve({ result: { workspaces, sessions, editLocIndex: editLocEntries } });
         return;
       }
 
