@@ -5,6 +5,30 @@ import { describe, it, expect } from 'vitest';
 
 import { parseClineSessions } from './parser-cline';
 
+type ClineContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string }
+  | {
+      type: 'tool_use';
+      name: string;
+      input: Record<string, unknown>;
+    };
+
+type ClineFixtureMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  ts: number;
+  content: ClineContentBlock[];
+  metrics?: {
+    inputTokens?: number;
+    outputTokens?: number;
+  };
+  modelInfo?: {
+    id: string;
+    provider: string;
+  };
+};
+
 /**
  * Helpers to build realistic Cline session fixtures
  */
@@ -49,7 +73,7 @@ function makeSessionMeta(sessionId: string, messagesPath: string) {
   };
 }
 
-function makeUserMessage(text: string, ts: number) {
+function makeUserMessage(text: string, ts: number): ClineFixtureMessage {
   return {
     id: `u-${ts}`,
     role: 'user',
@@ -61,9 +85,9 @@ function makeUserMessage(text: string, ts: number) {
 function makeAssistantMessage(
   text: string,
   ts: number,
-  toolBlocks: any[] = [],
+  toolBlocks: ClineContentBlock[] = [],
   metrics?: { inputTokens?: number; outputTokens?: number }
-) {
+): ClineFixtureMessage {
   return {
     id: `a-${ts}`,
     role: 'assistant',
@@ -80,7 +104,10 @@ function makeAssistantMessage(
   };
 }
 
-function toolUse(name: string, input: Record<string, unknown>) {
+function toolUse(
+  name: string,
+  input: Record<string, unknown>
+): ClineContentBlock {
   return {
     type: 'tool_use',
     name,
@@ -93,7 +120,7 @@ function toolUse(name: string, input: Record<string, unknown>) {
  */
 function withClineSession(
   sessionId: string,
-  messages: any[],
+  messages: ClineFixtureMessage[],
   run: (sessionsDir: string) => void
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cline-parser-test-'));
@@ -125,6 +152,16 @@ function withClineSession(
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+
+const assistantWithThinking: ClineFixtureMessage = {
+  id: 'a-2',
+  role: 'assistant',
+  ts: 2,
+  content: [
+    { type: 'text', text: 'answer' },
+    { type: 'thinking', thinking: 'internal reasoning' },
+  ],
+};
 
 describe('parseClineSessions', () => {
   it('creates a single request from user → assistant sequence', () => {
@@ -206,15 +243,7 @@ describe('parseClineSessions', () => {
       'sess-5',
       [
         makeUserMessage('question', 1),
-        {
-          id: 'a-2',
-          role: 'assistant',
-          ts: 2,
-          content: [
-            { type: 'text', text: 'answer' },
-            { type: 'thinking', thinking: 'internal reasoning' },
-          ],
-        },
+        assistantWithThinking,
       ],
       (sessionsDir) => {
         const session = parseClineSessions(sessionsDir)[0].sessions[0];
