@@ -34,6 +34,16 @@ const KNOWN_FILES: FilePattern[] = [
   { relativePath: '.github/skills', kind: 'skill', isDir: true, dirGlob: /SKILL\.md$/i, recurse: true },
   { relativePath: '.claude/skills', kind: 'skill', isDir: true, dirGlob: /SKILL\.md$/i, recurse: true, skipWhenRootIsHome: true },
   { relativePath: '.agents/skills', kind: 'skill', isDir: true, dirGlob: /SKILL\.md$/i, recurse: true, skipWhenRootIsHome: true },
+
+  // Cline workspace/local config
+  { relativePath: '.cline/rules', kind: 'instruction', isDir: true, dirGlob: /\.md$/i, recurse: true, skipWhenRootIsHome: true },
+  { relativePath: '.cline/skills', kind: 'skill', isDir: true, dirGlob: /SKILL\.md$/i, recurse: true, skipWhenRootIsHome: true },
+
+  // Cline CLI global-style layout when scanning home or copied project config
+  { relativePath: '.cline/data/settings/rules', kind: 'instruction', isDir: true, dirGlob: /\.md$/i, recurse: true, skipWhenRootIsHome: false },
+  { relativePath: '.cline/data/settings/skills', kind: 'skill', isDir: true, dirGlob: /SKILL\.md$/i, recurse: true, skipWhenRootIsHome: false },
+  { relativePath: '.cline/plugins', kind: 'other', isDir: true, dirGlob: /\.json$/i, recurse: true, skipWhenRootIsHome: true },
+
   { relativePath: 'AGENTS.md', kind: 'instruction' },
   { relativePath: 'CLAUDE.md', kind: 'claude-md' },
   { relativePath: '.claude/settings.json', kind: 'hook-config' },
@@ -76,10 +86,41 @@ export function resolveWorkspaceRoot(id: string, ws: Workspace): string | null {
   if (id.startsWith('claude-')) {
     return resolveClaudeRoot(ws.path);
   }
+
+  if (id.startsWith('cline-')) {
+    return resolveClineRoot(ws.path);
+  }
+
   if (id.startsWith('codex-') || id.startsWith('opencode-')) {
     return fs.existsSync(ws.path) ? ws.path : null;
   }
+
   return resolveVsCodeRoot(ws.path) ?? resolveCLIRoot(ws.path);
+}
+
+function resolveClineRoot(storagePath: string): string | null {
+  // Prefer explicit workspace.yaml if Cline stores one in the workspace/session dir.
+  const cliRoot = resolveCLIRoot(storagePath);
+  if (cliRoot) return cliRoot;
+
+  // Try common Cline session metadata locations.
+  const candidates = [
+    path.join(storagePath, 'workspace.json'),
+    path.join(storagePath, 'session.json'),
+    path.join(storagePath, 'metadata.json'),
+  ];
+
+  for (const candidate of candidates) {
+    const data = readJsonFile(candidate);
+    if (!isRecord(data)) continue;
+
+    const raw = firstStringProperty(data, 'cwd', 'root', 'workspace', 'folder');
+    const decoded = fileUriToPath(raw).replace(/\/+$/, '');
+
+    if (decoded && fs.existsSync(decoded)) return decoded;
+  }
+
+  return null;
 }
 
 function resolveVsCodeRoot(storagePath: string): string | null {
@@ -236,16 +277,22 @@ function isAgentProfileFile(fullPath: string, relativePath: string): boolean {
 export function scanPersonalSkillFiles(): ConfigFileInfo[] {
   const home = process.env.HOME || process.env.USERPROFILE || '';
   if (!home) return [];
+
   const files: ConfigFileInfo[] = [];
   const roots = [
     path.join(home, '.copilot', 'skills'),
     path.join(home, '.claude', 'skills'),
     path.join(home, '.agents', 'skills'),
+    path.join(home, '.cline', 'data', 'settings', 'skills'),
   ];
+
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
-    scanDirRecursive(root, root.replace(home + path.sep, '~/'), 'skill', /SKILL\.md$/i, files, 4);
+
+    const relativeBase = root.replace(home + path.sep, '~/');
+    scanDirRecursive(root, relativeBase, 'skill', /SKILL\.md$/i, files, 4);
   }
+
   return files;
 }
 
@@ -398,6 +445,7 @@ export function generateWorkspaceSuggestions(
   files: ConfigFileInfo[],
   hookCoverage: HookCoverageInfo | null,
   isClaudeWorkspace: boolean,
+  isClineWorkspace: boolean,
 ): string[] {
   const suggestions: string[] = [];
 
@@ -432,11 +480,47 @@ export function generateWorkspaceSuggestions(
     suggestions.push('Save reusable prompts as .github/prompts/*.prompt.md files. These can be invoked with /promptName in chat.');
   }
 
+  if (isClineWorkspace) {
+    const hasClineRules = files.some(f =>
+      f.kind === 'instruction' &&
+      (
+        f.relativePath.includes('.cline/rules') ||
+        f.relativePath.includes('.cline/data/settings/rules')
+      )
+    );
+
+    const hasClineSkills = files.some(f =>
+      f.kind === 'skill' &&
+      (
+        f.relativePath.includes('.cline/skills') ||
+        f.relativePath.includes('.cline/data/settings/skills')
+      )
+    );
+
+    const hasLargeInstructions = files.some(f =>
+      (f.kind === 'instruction' || f.kind === 'claude-md') &&
+      f.lines > 100
+    );
+
+    if (!hasClineRules && hasLargeInstructions) {
+      suggestions.push(
+        'Consider moving reusable Cline guidance into ~/.cline/data/settings/rules/*.md so global rules stay separate from project-specific instructions.',
+      );
+    }
+
+    if (!hasClineSkills && hasLargeInstructions) {
+      suggestions.push(
+        'Consider extracting reusable Cline workflows into ~/.cline/data/settings/skills/*/SKILL.md for progressive disclosure.',
+      );
+    }
+  }
+
   if (isClaudeWorkspace) {
     const hasClaudeMd = files.some(f => f.kind === 'claude-md' && f.relativePath === 'CLAUDE.md');
     if (!hasClaudeMd) {
       suggestions.push('Create a CLAUDE.md file for Claude Code instructions. Focus on deviations from standard practices -- Claude already knows common conventions.');
     }
+
     if (!hookCoverage) {
       suggestions.push('No hooks configured in .claude/settings.json. Hooks enforce deterministic boundaries: PreToolUse for security (block sensitive file edits), PostToolUse for auto-formatting (Prettier, Ruff).');
     } else {

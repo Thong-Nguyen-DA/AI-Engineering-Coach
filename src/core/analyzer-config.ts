@@ -69,14 +69,30 @@ export class ConfigAnalyzer extends AnalyzerBase {
   ): WorkspaceConfigHealth | null {
     const ws = this.workspaces.get(wsId);
     if (!ws) return null;
+
+    if (f?.harness && activity?.harness !== f.harness) {
+      return null;
+    }
+
     if (this.shouldSkipWorkspace(activity, cutoffDate, f)) return null;
 
-    const analysis = this.getWorkspaceAnalysisContext(wsId, ws, activity, f);
-    if (!analysis) return null;
-    if (analysis.kind === 'unresolved') {
+    const context = this.getWorkspaceAnalysisContext(wsId, ws, activity, f);
+
+    if (!context) return null;
+
+    if (context.kind === 'unresolved') {
       return this.buildUnresolvedWorkspaceHealth(wsId, ws.name, activity);
     }
-    return this.buildResolvedWorkspaceHealth(wsId, ws.name, activity, analysis.rootPath, analysis.isClaudeWorkspace, analysis.harness);
+
+    return this.buildResolvedWorkspaceHealth(
+      wsId,
+      ws.name,
+      activity,
+      context.rootPath,
+      context.isClaudeWorkspace,
+      context.isClineWorkspace,
+      context.harness,
+    );
   }
 
   private shouldSkipWorkspace(
@@ -94,14 +110,35 @@ export class ConfigAnalyzer extends AnalyzerBase {
     ws: Workspace,
     activity: { sessionCount: number; requestCount: number; lastTimestamp: number | null; lastDate: string | null; harness: string } | undefined,
     f?: DateFilter,
-  ): { kind: 'resolved'; rootPath: string; isClaudeWorkspace: boolean; harness: string } | { kind: 'unresolved' } | null {
+  ): {
+    kind: 'resolved';
+    rootPath: string;
+    isClaudeWorkspace: boolean;
+    isClineWorkspace: boolean;
+    harness: string;
+  } | { kind: 'unresolved' } | null {
     const rootPath = resolveWorkspaceRoot(wsId, ws);
     if (!rootPath) return f?.workspaceId ? { kind: 'unresolved' } : null;
 
-    const isClaudeWorkspace = wsId.startsWith('claude-');
-    const harness = activity?.harness || (isClaudeWorkspace ? 'Claude Code' : 'Local Agent');
-    if (f?.harness && harness !== f.harness) return null;
-    return { kind: 'resolved', rootPath, isClaudeWorkspace, harness };
+    const harness = activity?.harness || 'Local Agent';
+
+    const isClaudeWorkspace =
+      wsId.startsWith('claude-') ||
+      harness.toLowerCase().includes('claude');
+
+    const isClineWorkspace =
+      wsId.startsWith('cline-') ||
+      harness.toLowerCase().includes('cline') ||
+      fs.existsSync(path.join(rootPath, '.cline', 'data', 'settings', 'rules')) ||
+      fs.existsSync(path.join(rootPath, '.cline', 'data', 'settings', 'skills'));
+
+    return {
+      kind: 'resolved',
+      rootPath,
+      isClaudeWorkspace,
+      isClineWorkspace,
+      harness,
+    };
   }
 
   private buildResolvedWorkspaceHealth(
@@ -110,6 +147,7 @@ export class ConfigAnalyzer extends AnalyzerBase {
     activity: { sessionCount: number; requestCount: number; lastTimestamp: number | null; lastDate: string | null; harness: string } | undefined,
     rootPath: string,
     isClaudeWorkspace: boolean,
+    isClineWorkspace: boolean,
     harness: string,
   ): WorkspaceConfigHealth {
     const configFiles = scanConfigFiles(rootPath);
@@ -122,15 +160,20 @@ export class ConfigAnalyzer extends AnalyzerBase {
       rootPath,
       harness,
       configFiles,
-      hasInstructions: configFiles.some(cf => cf.kind === 'instruction' || cf.kind === 'claude-md'),
-      hasPrompts: configFiles.some(cf => cf.kind === 'prompt'),
-      hasAgents: configFiles.some(cf => cf.kind === 'agent'),
-      hasSkills: configFiles.some(cf => cf.kind === 'skill'),
-      hasHooks: hookCoverage !== null && hookCoverage.totalHooks > 0,
+      hasInstructions: configFiles.some(f => f.kind === 'instruction' || f.kind === 'claude-md'),
+      hasPrompts: configFiles.some(f => f.kind === 'prompt'),
+      hasAgents: configFiles.some(f => f.kind === 'agent'),
+      hasSkills: configFiles.some(f => f.kind === 'skill'),
+      hasHooks: !!hookCoverage && hookCoverage.totalHooks > 0,
       progressiveDisclosureScore: computeProgressiveDisclosureScore(configFiles),
       instructionQualityScore: computeInstructionQualityScore(configFiles),
       hookCoverage,
-      suggestions: generateWorkspaceSuggestions(configFiles, hookCoverage, isClaudeWorkspace),
+      suggestions: generateWorkspaceSuggestions(
+        configFiles,
+        hookCoverage,
+        isClaudeWorkspace,
+        isClineWorkspace,
+      ),
       sessionCount: activity?.sessionCount ?? 0,
       requestCount: activity?.requestCount ?? 0,
       lastActivity: activity?.lastTimestamp ?? null,
