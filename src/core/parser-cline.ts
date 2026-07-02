@@ -264,6 +264,11 @@ function extractThinkingFromContent(content: ClineContentBlock[]): string {
   return parts.join('\n').trim();
 }
 
+function extractUserInputContext(text: string): string {
+  const match = text.match(/^\s*<user_input\b[^>]*>([\s\S]*?)<\/user_input>\s*$/);
+  return (match ? match[1] : text).trim();
+}
+
 function applyClineToolBlock(
   block: ClineContentBlock,
   data: { toolsUsed: string[]; editedFiles: string[]; referencedFiles: string[]; skillsUsed: string[] }
@@ -340,100 +345,6 @@ interface ClineAssistantData {
   totalCacheWriteTokens: number;
   assistantCount: number;
 }
-
-// function collectClineAssistantData(
-//   messages: ClineMessage[],
-//   startIndex: number,
-//   lastTs: number | null
-// ): ClineAssistantData {
-//   const data: ClineAssistantData = {
-//     nextIndex: startIndex,
-//     lastTs,
-//     assistantTexts: [],
-//     thinkingTexts: [],
-//     toolsUsed: [],
-//     editedFiles: [],
-//     referencedFiles: [],
-//     skillsUsed: [],
-//     model: '',
-//     totalInputTokens: 0,
-//     totalOutputTokens: 0,
-//     totalCacheReadTokens: 0,
-//     totalCacheWriteTokens: 0,
-//     assistantCount: 0,
-//   };
-
-//   let i = startIndex;
-//   while (i < messages.length) {
-//     const msg = messages[i];
-//     if (msg.role === 'user') break;
-
-//     if (msg.role === 'assistant') {
-//       data.assistantCount++;
-//       const assistantTs = msg.ts;
-//       if (assistantTs && (!data.lastTs || assistantTs > data.lastTs)) data.lastTs = assistantTs;
-
-//       if (!data.model && msg.modelInfo?.id) {
-//         data.model = msg.modelInfo.id;
-//       }
-
-//       if (msg.metrics) {
-//         data.totalInputTokens += getNumberField(msg.metrics, 'inputTokens');
-//         data.totalOutputTokens += getNumberField(msg.metrics, 'outputTokens');
-//         data.totalCacheReadTokens += getNumberField(msg.metrics, 'cacheReadTokens');
-//         data.totalCacheWriteTokens += getNumberField(msg.metrics, 'cacheWriteTokens');
-//       }
-
-//       const text = extractTextFromContent(msg.content);
-//       if (text) data.assistantTexts.push(text);
-
-//       const thinking = extractThinkingFromContent(msg.content);
-//       if (thinking) data.thinkingTexts.push(thinking);
-
-//       for (const block of msg.content) {
-//         applyClineToolBlock(block, data);
-
-//         // Extract code content from write tools for LoC counting
-//         if (block.type === 'tool_use' && block.name && CLINE_WRITE_TOOLS.has(block.name) && block.input) {
-//           const filePath = getInputPath(block.input, 'path') || getInputPath(block.input, 'file_path');
-//           const code = typeof block.input.content === 'string' ? block.input.content : null;
-//           if (code && filePath) {
-//             const ext = filePath.split('.').pop() || 'unknown';
-//             data.assistantTexts.push(`\`\`\`${ext}\n${code}\n\`\`\``);
-//           }
-//         }
-
-//         // Capture tool_result outputs for context
-//         if (block.type === 'tool_result' && block.content) {
-//           if (typeof block.content === 'string') {
-//             data.assistantTexts.push(block.content);
-//           } else if (Array.isArray(block.content)) {
-//             for (const item of block.content) {
-//               if (item && typeof item === 'object') {
-//                 const record = item as Record<string, unknown>;
-
-//                 const maybeResult =
-//                   typeof record.result === 'string'
-//                     ? record.result
-//                     : typeof record.output === 'string'
-//                       ? record.output
-//                       : null;
-
-//                 if (maybeResult) {
-//                   data.assistantTexts.push(maybeResult);
-//                 }
-//               }
-//             }
-//           }
-//         }
-//       }
-//     }
-//     i++;
-//   }
-
-//   data.nextIndex = i;
-//   return data;
-// }
 
 function collectClineAssistantData(
   messages: ClineMessage[],
@@ -581,7 +492,7 @@ function buildClineRequest(
   return createRequest({
     requestId: userMsg.id || `cline-${requestIndex}`,
     timestamp: userMsg.ts,
-    messageText: extractTextFromContent(userMsg.content),
+    messageText: extractUserInputContext(extractTextFromContent(userMsg.content)),
     responseText: responseParts.join('\n'),
     agentName,
     agentMode: 'agent',
