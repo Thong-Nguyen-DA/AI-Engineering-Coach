@@ -31,16 +31,8 @@ npm run lint
 ## Rebuild after making changes
 
 ```bash
-npm run build
+npm run package
 ```
-
-or in dev
-
-```bash
-npm run watch
-```
-
-`watch` is better — it auto rebuilds when files change
 
 ```bash
 bash update.sh
@@ -50,6 +42,7 @@ bash update.sh
 
 - The app still misses a lot of existing sessions. Identify the problem and fix it. 🟡
     - Resolved nested tool_result.content array schema incompatibility ✅
+    - Resolved file handling incompatibility ✅
 - Use session-id.json metadata field for user prompt and token tracking. ✅
 - Convert timestamp value of session-id.json started_at and ended_at to match the app format ✅
 - Find out why the session ended_at are not recorded in the timeline. ✅
