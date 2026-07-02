@@ -105,7 +105,7 @@ interface ClineMessage {
 }
 
 interface ClineContentBlock {
-  type: 'text' | 'thinking' | 'tool_use' | 'tool_result';
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result' | 'file';
   text?: string;
   thinking?: string;
   id?: string;
@@ -114,6 +114,7 @@ interface ClineContentBlock {
   tool_use_id?: string;
   content?: string | Array<Record<string, unknown>>;
   is_error?: boolean;
+  path?: string;
 }
 
 // Too specific as tools can be added/removed.
@@ -132,11 +133,13 @@ function isClineContentBlock(value: unknown): value is ClineContentBlock {
     value.type !== 'text' &&
     value.type !== 'thinking' &&
     value.type !== 'tool_use' &&
-    value.type !== 'tool_result'
+    value.type !== 'tool_result' &&
+    value.type !== 'file'
   ) {
     return false;
   }
 
+  if (value.path !== undefined && typeof value.path !== 'string') return false;
   if (value.text !== undefined && typeof value.text !== 'string') return false;
   if (value.thinking !== undefined && typeof value.thinking !== 'string') return false;
   if (value.id !== undefined && typeof value.id !== 'string') return false;

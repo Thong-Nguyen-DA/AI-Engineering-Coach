@@ -14,6 +14,7 @@ type ClineToolResultItem = {
 type ClineContentBlock =
   | { type: 'text'; text: string }
   | { type: 'thinking'; thinking: string }
+  | { type: 'file'; path: string; content: string }
   | {
       type: 'tool_use';
       name: string;
@@ -312,6 +313,43 @@ describe('parseClineSessions', () => {
         expect(session.requests).toHaveLength(1);
         expect(session.requests[0].promptTokens).toBeNull();
         expect(session.requests[0].completionTokens).toBeNull();
+      }
+    );
+  });
+
+  it('accepts user messages with attached file content blocks', () => {
+    withClineSession(
+      'sess-file-attachment',
+      [
+        {
+          id: 'u-file-1',
+          role: 'user',
+          ts: 1,
+          content: [
+            {
+              type: 'text',
+              text: '<user_input mode="plan">Based on @./plan.md, create a detailed plan</user_input>',
+            },
+            {
+              type: 'file',
+              path: '/Users/me/project/plan.md',
+              content: '# Tool-Driven Code Generation Agent\n\nUse when: generating, executing, and fixing code automatically.',
+            },
+          ],
+        },
+        makeAssistantMessage('Here is the implementation plan.', 2),
+      ],
+      (sessionsDir) => {
+        const result = parseClineSessions(sessionsDir);
+
+        expect(result).toHaveLength(1);
+        const session = result[0].sessions[0];
+
+        expect(session.requests).toHaveLength(1);
+        expect(session.requests[0].messageText).toBe(
+          'Based on @./plan.md, create a detailed plan'
+        );
+        expect(session.requests[0].responseText).toBe('Here is the implementation plan.');
       }
     );
   });
