@@ -5,6 +5,12 @@ import { describe, it, expect } from 'vitest';
 
 import { parseClineSessions } from './parser-cline';
 
+type ClineToolResultItem = {
+  query: string;
+  result: string;
+  success: boolean;
+};
+
 type ClineContentBlock =
   | { type: 'text'; text: string }
   | { type: 'thinking'; thinking: string }
@@ -12,6 +18,13 @@ type ClineContentBlock =
       type: 'tool_use';
       name: string;
       input: Record<string, unknown>;
+    }
+  | {
+      type: 'tool_result';
+      tool_use_id: string;
+      name: string;
+      content: ClineToolResultItem[];
+      is_error?: boolean;
     };
 
 type ClineFixtureMessage = {
@@ -112,6 +125,19 @@ function toolUse(
     type: 'tool_use',
     name,
     input,
+  };
+}
+
+function structuredToolResult(
+  name: string,
+  toolUseId: string,
+  content: ClineToolResultItem[]
+): ClineContentBlock {
+  return {
+    type: 'tool_result',
+    tool_use_id: toolUseId,
+    name,
+    content,
   };
 }
 
@@ -286,6 +312,49 @@ describe('parseClineSessions', () => {
         expect(session.requests).toHaveLength(1);
         expect(session.requests[0].promptTokens).toBeNull();
         expect(session.requests[0].completionTokens).toBeNull();
+      }
+    );
+  });
+
+  it('accepts structured tool_result content arrays from command-style tools', () => {
+    withClineSession(
+      'sess-8',
+      [
+        makeUserMessage('Explore the current directory', 1),
+        makeAssistantMessage('listing files...', 2, [
+          toolUse('run_commands', {
+            commands: [
+              {
+                command: 'ls',
+                args: ['-la'],
+              },
+            ],
+          }),
+        ]),
+        {
+          id: 'tool-result-3',
+          role: 'user',
+          ts: 3,
+          content: [
+            structuredToolResult('run_commands', 'call-run-commands-1', [
+              {
+                query: 'ls -la',
+                result: 'total 0\ndrwxr-xr-x  project\n-rw-r--r--  package.json\n',
+                success: true,
+              },
+            ]),
+          ],
+        },
+      ],
+      (sessionsDir) => {
+        const result = parseClineSessions(sessionsDir);
+
+        expect(result).toHaveLength(1);
+        const session = result[0].sessions[0];
+
+        expect(session.requests).toHaveLength(1);
+        expect(session.requests[0].messageText).toBe('Explore the current directory');
+        expect(session.requests[0].toolsUsed).toContain('run_commands');
       }
     );
   });

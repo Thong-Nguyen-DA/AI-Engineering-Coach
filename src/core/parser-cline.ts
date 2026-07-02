@@ -112,7 +112,7 @@ interface ClineContentBlock {
   name?: string;
   input?: Record<string, unknown>;
   tool_use_id?: string;
-  content?: Array<{ type: string; text?: string }>;
+  content?: string | Array<Record<string, unknown>>;
   is_error?: boolean;
 }
 
@@ -151,7 +151,7 @@ function isClineContentBlock(value: unknown): value is ClineContentBlock {
     if (typeof value.content === 'string') return true;
 
     if (Array.isArray(value.content)) {
-      return value.content.every(c => isRecord(c) && typeof c.type === 'string');
+      return value.content.every(item => isRecord(item));
     }
 
     return false;
