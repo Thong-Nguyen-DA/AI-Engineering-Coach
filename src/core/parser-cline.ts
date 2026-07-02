@@ -238,11 +238,6 @@ function getTimestamp(isoString: string): number | null {
   }
 }
 
-function getNumberField(record: Record<string, unknown> | undefined, key: string): number {
-  const value = record?.[key];
-  return typeof value === 'number' ? value : 0;
-}
-
 function getInputPath(input: Record<string, unknown> | undefined, key: string): string | null {
   const value = input?.[key];
   return typeof value === 'string' ? value : null;
@@ -339,10 +334,6 @@ interface ClineAssistantData {
   referencedFiles: string[];
   skillsUsed: string[];
   model: string;
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  totalCacheReadTokens: number;
-  totalCacheWriteTokens: number;
   assistantCount: number;
 }
 
@@ -361,10 +352,6 @@ function collectClineAssistantData(
     referencedFiles: [],
     skillsUsed: [],
     model: '',
-    totalInputTokens: 0,
-    totalOutputTokens: 0,
-    totalCacheReadTokens: 0,
-    totalCacheWriteTokens: 0,
     assistantCount: 0,
   };
 
@@ -385,11 +372,6 @@ function collectClineAssistantData(
 
       if (!data.model && msg.modelInfo?.id) {
         data.model = msg.modelInfo.id;
-      }
-
-      if (msg.metrics) {
-        data.totalInputTokens += getNumberField(msg.metrics, 'inputTokens');
-        data.totalOutputTokens += getNumberField(msg.metrics, 'outputTokens');
       }
 
       const text = extractTextFromContent(msg.content);
@@ -452,7 +434,8 @@ function buildClineSession(
       msg,
       assistantData,
       requestIndex++,
-      messagesData.agent
+      messagesData.agent,
+      meta
     );
 
     requests.push(request);
@@ -480,9 +463,14 @@ function buildClineRequest(
   userMsg: ClineMessage,
   assistantData: ClineAssistantData,
   requestIndex: number,
-  agentName: string
+  agentName: string,
+  meta: ClineSessionMeta
 ): SessionRequest {
-  const hasAnyTokens = assistantData.assistantCount > 0;
+  const inputTokens = meta.metadata?.usage?.inputTokens ?? 0;
+  const outputTokens = meta.metadata?.usage?.outputTokens ?? 0;
+  const cacheReadTokens = meta.metadata?.usage?.cacheReadTokens ?? 0;
+  const cacheWriteTokens = meta.metadata?.usage?.cacheWriteTokens ?? 0;
+  const hasAnyTokens = inputTokens > 0 || outputTokens > 0;
   const uniqueRefs = [...new Set(assistantData.referencedFiles)];
   const skills = new Set(assistantData.skillsUsed);
 
@@ -503,10 +491,10 @@ function buildClineRequest(
     skillsUsed: [...skills],
     variableKinds: {},
     totalElapsed: assistantData.lastTs ? assistantData.lastTs - userMsg.ts : null,
-    promptTokens: hasAnyTokens ? assistantData.totalInputTokens : null,
-    completionTokens: hasAnyTokens ? assistantData.totalOutputTokens : null,
-    cacheReadTokens: assistantData.totalCacheReadTokens > 0 ? assistantData.totalCacheReadTokens : null,
-    cacheWriteTokens: assistantData.totalCacheWriteTokens > 0 ? assistantData.totalCacheWriteTokens : null,
+    promptTokens: hasAnyTokens ? inputTokens : null,
+    completionTokens: hasAnyTokens ? outputTokens : null,
+    cacheReadTokens: cacheReadTokens > 0 ? cacheReadTokens : null,
+    cacheWriteTokens: cacheWriteTokens > 0 ? cacheWriteTokens : null,
     reasoningEffort: extractReasoningEffortFromModelId(assistantData.model),
   });
 }
@@ -518,68 +506,6 @@ export function findClineDirs(): string[] {
   if (fs.existsSync(sessionsDir)) dirs.push(sessionsDir);
   return dirs;
 }
-
-// export function parseClineSessions(sessionsDir: string): { sessions: Session[]; workspaceId: string; workspaceName: string }[] {
-//   const results: { sessions: Session[]; workspaceId: string; workspaceName: string }[] = [];
-
-//   let sessionDirs: fs.Dirent[];
-//   try {
-//     sessionDirs = fs.readdirSync(sessionsDir, { withFileTypes: true }).filter(e => e.isDirectory());
-//   } catch {
-//     return results;
-//   }
-
-//   for (const sessionDir of sessionDirs) {
-//     const sessionPath = path.join(sessionsDir, sessionDir.name);
-//     const metaPath = path.join(sessionPath, `${sessionDir.name}.json`);
-//     const messagesPath = path.join(sessionPath, `${sessionDir.name}.messages.json`);
-
-//     const meta = parseClineSessionMeta(metaPath);
-//     const messages = parseClineMessages(messagesPath);
-
-//     if (!meta || !messages) continue;
-
-//     const workspaceId = `cline-${sessionDir.name}`;
-//     const workspaceName = path.basename(meta.workspace_root || meta.cwd || sessionDir.name);
-
-//     const requests: SessionRequest[] = [];
-//     let requestIndex = 0;
-
-//     for (let i = 0; i < messages.messages.length; i++) {
-//       const msg = messages.messages[i];
-//       if (msg.role !== 'user') continue;
-      
-//       // Skip tool_result-only user messages (no real user input)
-//       if (!extractTextFromContent(msg.content)) continue;
-
-//       const assistantData = collectClineAssistantData(messages.messages, i + 1, null);
-//       const request = buildClineRequest(msg, assistantData, requestIndex++, messages.agent);
-//       requests.push(request);
-//       i = assistantData.nextIndex - 1;
-//     }
-
-//     if (requests.length === 0) continue;
-
-//     const session = createSession({
-//       sessionId: meta.session_id,
-//       workspaceId,
-//       workspaceName,
-//       location: 'terminal',
-//       harness: 'Cline',
-//       creationDate: getTimestamp(meta.started_at),
-//       lastMessageDate: meta.ended_at ? getTimestamp(meta.ended_at) : (requests.length > 0 ? requests[requests.length - 1].timestamp : null),
-//       requests,
-//       hasDevcontainer: false,
-//       workspaceRootPath: meta.workspace_root || meta.cwd || undefined,
-//       launcherKind: meta.interactive ? 'interactive' : 'programmatic',
-//       entrypoint: meta.source,
-//     });
-
-//     results.push({ sessions: [session], workspaceId, workspaceName });
-//   }
-
-//   return results;
-// }
 
 export function parseClineSessions(
   sessionsDir: string
@@ -664,7 +590,7 @@ export async function parseClineSessionsAsync(
       if (!extractTextFromContent(msg.content)) continue;
 
       const assistantData = collectClineAssistantData(messages.messages, j + 1, null);
-      const request = buildClineRequest(msg, assistantData, requestIndex++, messages.agent);
+      const request = buildClineRequest(msg, assistantData, requestIndex++, messages.agent, meta);
       requests.push(request);
       j = assistantData.nextIndex - 1;
     }
