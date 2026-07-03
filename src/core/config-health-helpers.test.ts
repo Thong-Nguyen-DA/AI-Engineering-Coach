@@ -9,6 +9,7 @@ import * as path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   scanConfigFiles,
+  scanPersonalSkillFiles,
   isCloudPath,
   analyzeHookCoverage,
   computeProgressiveDisclosureScore,
@@ -47,6 +48,24 @@ describe('resolveWorkspaceRoot', () => {
   it('uses existing Codex workspace paths as root paths', () => {
     const root = makeTempDir();
     expect(resolveWorkspaceRoot('codex-proj-1234', { id: 'codex-proj-1234', name: 'proj', path: root })).toBe(root);
+  });
+});
+
+describe('resolveWorkspaceRoot - Cline', () => {
+  it('uses existing Cline workspace paths with Cline markers as root paths', () => {
+    const root = makeTempDir();
+    writeFile(root, '.clinerules/general.md', '# General rules\n\nUse TypeScript.');
+    expect(resolveWorkspaceRoot('cline-proj-1234', { id: 'cline-proj-1234', name: 'proj', path: root })).toBe(root);
+  });
+
+  it('returns null for missing Cline workspace paths', () => {
+    const missingRoot = path.join(os.tmpdir(), `missing-cline-${Date.now()}`);
+    expect(resolveWorkspaceRoot('cline-proj-missing', { id: 'cline-proj-missing', name: 'missing', path: missingRoot })).toBeNull();
+  });
+
+  it('returns null for existing Cline workspace paths without Cline markers', () => {
+    const root = makeTempDir();
+    expect(resolveWorkspaceRoot('cline-proj-no-markers', { id: 'cline-proj-no-markers', name: 'proj', path: root })).toBeNull();
   });
 });
 
@@ -130,6 +149,120 @@ Explain the following code.
     writeFile(root, '.github/skills/my-skill/SKILL.md', '# Skill\n\nDo things.');
     const files = scanConfigFiles(root);
     expect(files.some(f => f.kind === 'skill')).toBe(true);
+  });
+
+  it('detects Cline rules recursively under .cline/rules', () => {
+    const root = makeTempDir();
+    writeFile(root, '.cline/rules/general.md', '# General rules\n\nUse TypeScript.');
+    writeFile(root, '.cline/rules/frontend/react.md', '# React rules\n\nPrefer hooks.');
+
+    const files = scanConfigFiles(root);
+
+    expect(files.some(f =>
+      f.kind === 'instruction' &&
+      f.relativePath === path.join('.cline/rules', 'general.md')
+    )).toBe(true);
+    expect(files.some(f =>
+      f.kind === 'instruction' &&
+      f.relativePath === path.join('.cline/rules', 'frontend', 'react.md')
+    )).toBe(true);
+  });
+
+  it('detects legacy .clinerules markdown files when .clinerules is a directory', () => {
+    const root = makeTempDir();
+    writeFile(root, '.clinerules/backend.md', '# Backend rules\n\nUse repositories.');
+
+    const files = scanConfigFiles(root);
+
+    expect(files.some(f =>
+      f.kind === 'instruction' &&
+      f.relativePath === path.join('.clinerules', 'backend.md')
+    )).toBe(true);
+  });
+
+  it('detects Cline skills under .cline/skills', () => {
+    const root = makeTempDir();
+    writeFile(root, '.cline/skills/refactor/SKILL.md', '# Refactor skill\n\nImprove code structure.');
+
+    const files = scanConfigFiles(root);
+
+    expect(files.some(f =>
+      f.kind === 'skill' &&
+      f.relativePath === path.join('.cline/skills', 'refactor', 'SKILL.md')
+    )).toBe(true);
+  });
+
+  it('detects Cline CLI global-style rules and skills under .cline/data/settings', () => {
+    const root = makeTempDir();
+    writeFile(root, '.cline/data/settings/rules/project.md', '# Project rules\n\nFollow conventions.');
+    writeFile(root, '.cline/data/settings/skills/testing/SKILL.md', '# Testing skill\n\nWrite tests.');
+
+    const files = scanConfigFiles(root);
+
+    expect(files.some(f =>
+      f.kind === 'instruction' &&
+      f.relativePath === path.join('.cline/data/settings/rules', 'project.md')
+    )).toBe(true);
+    expect(files.some(f =>
+      f.kind === 'skill' &&
+      f.relativePath === path.join('.cline/data/settings/skills', 'testing', 'SKILL.md')
+    )).toBe(true);
+  });
+
+  it('detects Cline plugin json files under .cline/plugins', () => {
+    const root = makeTempDir();
+    writeFile(root, '.cline/plugins/example/plugin.json', JSON.stringify({ name: 'example-plugin' }));
+
+    const files = scanConfigFiles(root);
+
+    expect(files.some(f =>
+      f.kind === 'other' &&
+      f.relativePath === path.join('.cline/plugins', 'example', 'plugin.json')
+    )).toBe(true);
+  });
+
+  it('does not include workspace Cline rules, skills, or plugins when scanning home', () => {
+    const root = makeTempDir();
+    const prevHome = process.env.HOME;
+
+    try {
+      process.env.HOME = root;
+      writeFile(root, '.cline/rules/local.md', '# Local Cline rules');
+      writeFile(root, '.cline/skills/local/SKILL.md', '# Local Cline skill');
+      writeFile(root, '.cline/plugins/local/plugin.json', '{}');
+
+      const files = scanConfigFiles(root);
+
+      expect(files.some(f => f.relativePath.includes(path.join('.cline', 'rules')))).toBe(false);
+      expect(files.some(f => f.relativePath.includes(path.join('.cline', 'skills')))).toBe(false);
+      expect(files.some(f => f.relativePath.includes(path.join('.cline', 'plugins')))).toBe(false);
+    } finally {
+      process.env.HOME = prevHome;
+    }
+  });
+
+  it('includes Cline CLI global-style settings when scanning home', () => {
+    const root = makeTempDir();
+    const prevHome = process.env.HOME;
+
+    try {
+      process.env.HOME = root;
+      writeFile(root, '.cline/data/settings/rules/global.md', '# Global Cline rules');
+      writeFile(root, '.cline/data/settings/skills/global/SKILL.md', '# Global Cline skill');
+
+      const files = scanConfigFiles(root);
+
+      expect(files.some(f =>
+        f.kind === 'instruction' &&
+        f.relativePath === path.join('.cline/data/settings/rules', 'global.md')
+      )).toBe(true);
+      expect(files.some(f =>
+        f.kind === 'skill' &&
+        f.relativePath === path.join('.cline/data/settings/skills', 'global', 'SKILL.md')
+      )).toBe(true);
+    } finally {
+      process.env.HOME = prevHome;
+    }
   });
 });
 
@@ -234,7 +367,7 @@ describe('computeInstructionQualityScore', () => {
 
 describe('generateWorkspaceSuggestions', () => {
   it('suggests creating instructions when none exist', () => {
-    const suggestions = generateWorkspaceSuggestions([], null, false);
+    const suggestions = generateWorkspaceSuggestions([], null, false, false);
     expect(suggestions.some(s => s.includes('copilot-instructions.md'))).toBe(true);
   });
 
@@ -242,7 +375,7 @@ describe('generateWorkspaceSuggestions', () => {
     const files: ConfigFileInfo[] = [
       { relativePath: 'CLAUDE.md', kind: 'claude-md', lines: 10, chars: 100, isMarkdown: true, markdownIssues: [], sizeVerdict: 'compact', lastModified: null },
     ];
-    const suggestions = generateWorkspaceSuggestions(files, null, true);
+    const suggestions = generateWorkspaceSuggestions(files, null, true, false);
     expect(suggestions.some(s => s.includes('hooks'))).toBe(true);
   });
 
@@ -250,7 +383,7 @@ describe('generateWorkspaceSuggestions', () => {
     const files: ConfigFileInfo[] = [
       { relativePath: '.github/copilot-instructions.md', kind: 'instruction', lines: 10, chars: 100, isMarkdown: true, markdownIssues: [], sizeVerdict: 'compact', lastModified: null },
     ];
-    const suggestions = generateWorkspaceSuggestions(files, null, false);
+    const suggestions = generateWorkspaceSuggestions(files, null, false, false);
     expect(suggestions.some(s => s.includes('prompt'))).toBe(true);
   });
 
@@ -258,8 +391,32 @@ describe('generateWorkspaceSuggestions', () => {
     const files: ConfigFileInfo[] = [
       { relativePath: '.github/copilot-instructions.md', kind: 'instruction', lines: 600, chars: 6000, isMarkdown: true, markdownIssues: [], sizeVerdict: 'oversized', lastModified: null },
     ];
-    const suggestions = generateWorkspaceSuggestions(files, null, false);
+    const suggestions = generateWorkspaceSuggestions(files, null, false, false);
     expect(suggestions.some(s => s.includes('600 lines'))).toBe(true);
+  });
+});
+
+describe('scanPersonalSkillFiles - Cline', () => {
+  it('detects personal Cline skills under ~/.cline/data/settings/skills', () => {
+    const home = makeTempDir();
+    const prevHome = process.env.HOME;
+    const prevUserProfile = process.env.USERPROFILE;
+
+    try {
+      process.env.HOME = home;
+      process.env.USERPROFILE = '';
+      writeFile(home, '.cline/data/settings/skills/code-review/SKILL.md', '# Code review\n\nReview code.');
+
+      const files = scanPersonalSkillFiles();
+
+      expect(files.some(f =>
+        f.kind === 'skill' &&
+        f.relativePath === path.join('~', '.cline', 'data', 'settings', 'skills', 'code-review', 'SKILL.md')
+      )).toBe(true);
+    } finally {
+      process.env.HOME = prevHome;
+      process.env.USERPROFILE = prevUserProfile;
+    }
   });
 });
 

@@ -37,6 +37,8 @@ const KNOWN_FILES: FilePattern[] = [
 
   // Cline workspace/local config
   { relativePath: '.cline/rules', kind: 'instruction', isDir: true, dirGlob: /\.md$/i, recurse: true, skipWhenRootIsHome: true },
+  { relativePath: '.clinerules', kind: 'instruction', isDir: true, dirGlob: /\.md$/i, recurse: true, skipWhenRootIsHome: true },
+  { relativePath: '.agents/skills', kind: 'skill', isDir: true, dirGlob: /SKILL\.md$/i, recurse: true, skipWhenRootIsHome: true },
   { relativePath: '.cline/skills', kind: 'skill', isDir: true, dirGlob: /SKILL\.md$/i, recurse: true, skipWhenRootIsHome: true },
 
   // Cline CLI global-style layout when scanning home or copied project config
@@ -98,29 +100,24 @@ export function resolveWorkspaceRoot(id: string, ws: Workspace): string | null {
   return resolveVsCodeRoot(ws.path) ?? resolveCLIRoot(ws.path);
 }
 
-function resolveClineRoot(storagePath: string): string | null {
-  // Prefer explicit workspace.yaml if Cline stores one in the workspace/session dir.
-  const cliRoot = resolveCLIRoot(storagePath);
-  if (cliRoot) return cliRoot;
+function resolveClineRoot(workspacePath: string): string | null {
+    if (!fs.existsSync(workspacePath)) {
+        return null;
+    }
 
-  // Try common Cline session metadata locations.
-  const candidates = [
-    path.join(storagePath, 'workspace.json'),
-    path.join(storagePath, 'session.json'),
-    path.join(storagePath, 'metadata.json'),
-  ];
+    const markers = [
+        '.clinerules',
+        '.cline',
+        '.agents',
+        'memory-bank',
+        'package.json',
+    ];
 
-  for (const candidate of candidates) {
-    const data = readJsonFile(candidate);
-    if (!isRecord(data)) continue;
+    const hasMarker = markers.some(marker =>
+        fs.existsSync(path.join(workspacePath, marker))
+    );
 
-    const raw = firstStringProperty(data, 'cwd', 'root', 'workspace', 'folder');
-    const decoded = fileUriToPath(raw).replace(/\/+$/, '');
-
-    if (decoded && fs.existsSync(decoded)) return decoded;
-  }
-
-  return null;
+    return hasMarker ? workspacePath : null;
 }
 
 function resolveVsCodeRoot(storagePath: string): string | null {
@@ -485,6 +482,7 @@ export function generateWorkspaceSuggestions(
       f.kind === 'instruction' &&
       (
         f.relativePath.includes('.cline/rules') ||
+        f.relativePath.includes('.clinerules') ||
         f.relativePath.includes('.cline/data/settings/rules')
       )
     );
@@ -493,12 +491,18 @@ export function generateWorkspaceSuggestions(
       f.kind === 'skill' &&
       (
         f.relativePath.includes('.cline/skills') ||
+        f.relativePath.includes('.agents/skills') ||
         f.relativePath.includes('.cline/data/settings/skills')
       )
     );
 
     const hasLargeInstructions = files.some(f =>
-      (f.kind === 'instruction' || f.kind === 'claude-md') &&
+      f.kind === 'instruction' &&
+      (
+        f.relativePath.includes('.cline/rules') ||
+        f.relativePath.includes('.clinerules') ||
+        f.relativePath.includes('.cline/data/settings/rules')
+      ) &&
       f.lines > 100
     );
 

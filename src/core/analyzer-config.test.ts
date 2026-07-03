@@ -592,4 +592,143 @@ describe('ConfigAnalyzer', () => {
     expect(result.workspaces).toHaveLength(1);
     expect(result.workspaces[0].workspaceId).toBe('ws-1');
   });
+
+  it('treats Cline harness sessions as Cline workspaces without analyzing Claude hooks', () => {
+    const configFiles = [
+      makeConfigFile({ relativePath: '.clinerules', kind: 'instruction' }),
+      makeConfigFile({ relativePath: '.cline/rules/architecture.md', kind: 'instruction' }),
+    ];
+    scanConfigFilesMock.mockReturnValue(configFiles);
+    generateWorkspaceSuggestionsMock.mockReturnValue(['Cline rules detected']);
+
+    const result = makeAnalyzer(
+      [makeSession({
+        workspaceId: 'ws-1',
+        workspaceName: 'ClineProject',
+        harness: 'Cline',
+        requestCount: 60,
+        requests: [makeRequest({ requestId: 'req-1' })],
+      })],
+      [makeWorkspace({ id: 'ws-1', name: 'ClineProject', path: '/fake/root/cline-project' })],
+    ).getConfigHealth();
+
+    expect(result.workspaces).toHaveLength(1);
+    expect(result.workspaces[0]).toMatchObject({
+      workspaceId: 'ws-1',
+      workspaceName: 'ClineProject',
+      rootPath: '/fake/root/cline-project',
+      harness: 'Cline',
+      hasInstructions: true,
+      hasHooks: false,
+      hookCoverage: null,
+      suggestions: ['Cline rules detected'],
+    });
+    expect(result.workspaces[0].configFiles.map(file => file.relativePath)).toEqual([
+      '.clinerules',
+      '.cline/rules/architecture.md',
+    ]);
+    expect(scanConfigFilesMock).toHaveBeenCalledWith('/fake/root/cline-project');
+    expect(analyzeHookCoverageMock).not.toHaveBeenCalled();
+    expect(generateWorkspaceSuggestionsMock).toHaveBeenCalledWith(
+      configFiles,
+      null,
+      false,
+      true,
+    );
+  });
+
+  it('treats workspace ids with the cline prefix as Cline workspaces', () => {
+    const configFiles = [
+      makeConfigFile({ relativePath: '.cline/rules/testing.md', kind: 'instruction' }),
+    ];
+    scanConfigFilesMock.mockReturnValue(configFiles);
+
+    const result = makeAnalyzer(
+      [makeSession({
+        workspaceId: 'cline-ws-1',
+        workspaceName: 'PrefixedClineProject',
+        harness: 'VS Code',
+        requestCount: 60,
+        requests: [makeRequest({ requestId: 'req-1' })],
+      })],
+      [makeWorkspace({ id: 'cline-ws-1', name: 'PrefixedClineProject', path: '/fake/root/prefixed-cline-project' })],
+    ).getConfigHealth();
+
+    expect(result.workspaces).toHaveLength(1);
+    expect(result.workspaces[0]).toMatchObject({
+      workspaceId: 'cline-ws-1',
+      workspaceName: 'PrefixedClineProject',
+      harness: 'VS Code',
+      hasInstructions: true,
+      hasHooks: false,
+      hookCoverage: null,
+    });
+    expect(analyzeHookCoverageMock).not.toHaveBeenCalled();
+    expect(generateWorkspaceSuggestionsMock).toHaveBeenCalledWith(
+      configFiles,
+      null,
+      false,
+      true,
+    );
+  });
+
+  it('keeps Cline and Claude hook behavior separated for mixed workspaces', () => {
+    scanConfigFilesMock.mockImplementation(rootPath => {
+      if (rootPath.includes('cline-project')) {
+        return [makeConfigFile({ relativePath: '.clinerules', kind: 'instruction' })];
+      }
+      return [makeConfigFile({ relativePath: 'CLAUDE.md', kind: 'claude-md' })];
+    });
+    analyzeHookCoverageMock.mockReturnValue({
+      hasPreToolUse: true,
+      hasPostToolUse: false,
+      hasSessionStart: false,
+      hasPermissionRequest: false,
+      totalHooks: 1,
+      hookEvents: ['PreToolUse'],
+    });
+
+    const result = makeAnalyzer(
+      [
+        makeSession({
+          sessionId: 'cline-session',
+          workspaceId: 'ws-cline',
+          workspaceName: 'ClineProject',
+          harness: 'Cline',
+          requestCount: 60,
+          requests: [makeRequest({ requestId: 'cline-req' })],
+        }),
+        makeSession({
+          sessionId: 'claude-session',
+          workspaceId: 'ws-claude',
+          workspaceName: 'ClaudeProject',
+          harness: 'Claude Code',
+          requestCount: 60,
+          requests: [makeRequest({ requestId: 'claude-req' })],
+        }),
+      ],
+      [
+        makeWorkspace({ id: 'ws-cline', name: 'ClineProject', path: '/fake/root/cline-project' }),
+        makeWorkspace({ id: 'ws-claude', name: 'ClaudeProject', path: '/fake/root/claude-project' }),
+      ],
+    ).getConfigHealth();
+
+    const clineHealth = result.workspaces.find(workspace => workspace.workspaceId === 'ws-cline');
+    const claudeHealth = result.workspaces.find(workspace => workspace.workspaceId === 'ws-claude');
+
+    expect(clineHealth).toMatchObject({
+      harness: 'Cline',
+      hasInstructions: true,
+      hasHooks: false,
+      hookCoverage: null,
+    });
+    expect(claudeHealth).toMatchObject({
+      harness: 'Claude Code',
+      hasInstructions: true,
+      hasHooks: true,
+    });
+    expect(claudeHealth?.hookCoverage?.totalHooks).toBe(1);
+    expect(analyzeHookCoverageMock).toHaveBeenCalledTimes(1);
+    expect(analyzeHookCoverageMock).toHaveBeenCalledWith('/fake/root/claude-project');
+  });
 });

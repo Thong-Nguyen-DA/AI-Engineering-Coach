@@ -428,6 +428,95 @@ Verify the result with at least 3 test cases.
       expect(result.readinessScore).toBe(0);
     });
 
+    it('identifies Cline as the primary harness when it has the most sessions', () => {
+			const ts = new Date('2024-03-15T10:00:00').getTime();
+			const sessions = [
+				makeSession({ harness: 'Cline', requests: [makeRequest({ timestamp: ts })], lastMessageDate: ts }),
+				makeSession({ harness: 'Cline', requests: [makeRequest({ timestamp: ts + 1000 })], lastMessageDate: ts + 1000 }),
+				makeSession({ harness: 'Local Agent', requests: [makeRequest({ timestamp: ts + 2000 })], lastMessageDate: ts + 2000 }),
+			];
+
+			const analyzer = createAnalyzer(sessions);
+			const result = analyzer.getInsights().migrationReadiness;
+
+			expect(result.primaryHarness).toBe('Cline');
+		});
+
+		it('marks Cline-supported features as available when they are used', () => {
+			const ts = new Date('2024-03-15T10:00:00').getTime();
+			const session = makeSession({
+				harness: 'Cline',
+				requests: [
+					makeRequest({
+						timestamp: ts,
+						agentName: 'Cline',
+						agentMode: 'plan',
+						slashCommand: 'plan',
+						toolsUsed: ['mcp_filesystem.read_file', 'terminal.runCommand'],
+						editedFiles: ['src/a.ts', 'src/b.ts'],
+						referencedFiles: ['src/a.ts'],
+						variableKinds: { file: 1 },
+						customInstructions: ['Prefer small, focused changes'],
+						skillsUsed: ['typescript'],
+					}),
+				],
+				lastMessageDate: ts,
+			});
+
+			const analyzer = createAnalyzer([session]);
+			const result = analyzer.getInsights().migrationReadiness;
+			const usedFeatureNames = result.featureUsage.filter(feature => feature.used).map(feature => feature.feature);
+
+			expect(result.primaryHarness).toBe('Cline');
+			expect(usedFeatureNames).toEqual(expect.arrayContaining([
+				'Sub-agents',
+				'MCP Tools',
+				'Custom Instructions',
+				'Plan Mode',
+				'Skills',
+				'Slash Commands',
+				'Multi-file Edits',
+				'Terminal Access',
+				'File References',
+			]));
+			expect(result.missingFeatures).not.toEqual(expect.arrayContaining([
+				'Sub-agents',
+				'MCP Tools',
+				'Custom Instructions',
+				'Plan Mode',
+				'Skills',
+				'Slash Commands',
+				'Multi-file Edits',
+				'Terminal Access',
+				'File References',
+			]));
+			expect(result.readinessScore).toBeGreaterThan(0);
+		});
+
+		it('does not list Parallel Sessions as a Cline-supported migration feature', () => {
+			const ts = new Date('2024-03-15T10:00:00').getTime();
+			const sessions = [
+				makeSession({
+					sessionId: 'cline-1',
+					harness: 'Cline',
+					requests: [makeRequest({ timestamp: ts })],
+					lastMessageDate: ts,
+				}),
+				makeSession({
+					sessionId: 'cline-2',
+					harness: 'Cline',
+					requests: [makeRequest({ timestamp: ts + 1000 })],
+					lastMessageDate: ts + 1000,
+				}),
+			];
+
+			const analyzer = createAnalyzer(sessions);
+			const result = analyzer.getInsights().migrationReadiness;
+
+			expect(result.primaryHarness).toBe('Cline');
+      expect(result.featureUsage.map(feature => feature.feature)).not.toContain('Parallel Sessions');
+		});
+
     it('identifies primary harness', () => {
       const ts = new Date('2024-03-15T10:00:00').getTime();
       const sessions = [
